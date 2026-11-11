@@ -18,48 +18,75 @@ const supabaseClient =
     ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
 
-// 1. 役職（ロール）の内部定義値
+// 1. 役職（ロール）の再定義（内部ロール値 & 日本語役職名の相互マッピング）
+// 再定義された6役職: 「代表」「副代表」「運営メンバー」「在校生」「OB・OG」「開発管理者」（※未ログイン・未照合時のみ内部状態として guest を保持）
 const RBAC_ROLES = [
-  "developer",      // 開発管理者
   "president",      // 代表
   "vice_president", // 副代表
   "manager",        // 運営メンバー
   "student",        // 在校生
   "alumni",         // OB・OG
-  "guest"           // 未承認・デフォルト値
+  "developer",      // 開発管理者
+  "guest"           // 未承認（ログイン直後・名簿照合前の初期値）
 ];
 
-// 幹部・運営メンバー4役職の共通グループ
-const ADMIN_ROLES = ["developer", "president", "vice_president", "manager"];
-
-// 2. 役職ごとの権限マトリクス定義
-const RBAC_PERMISSIONS = {
-  // 【CSVダウンロード / DBプレビュー】
-  csvDownload: ["developer", "president", "vice_president", "manager"],
-
-  // 【メンバー管理】
-  membersView: ["developer", "president", "vice_president", "manager"],
-  membersEdit: ["developer", "president", "vice_president", "manager"],
-  changeRoleToManager: ["developer", "president", "vice_president"],
-  changeRoleToVicePresident: ["developer", "president", "vice_president"], // presidentにも付与
-  changeRoleToPresident: ["developer", "president", "vice_president"],
-
-  // 【タスク管理】
-  tasksAll: ["developer", "president", "vice_president", "manager"],
-
-  // 【イベント管理】
-  eventsView: ["developer", "president", "vice_president", "manager", "student", "alumni"],
-  eventsEdit: ["developer", "president", "vice_president", "manager"],
-
-  // 【出欠調整】
-  attendanceViewAndInput: ["developer", "president", "vice_president", "manager", "student"],
-  attendanceManageDates: ["developer", "president", "vice_president", "manager"]
+const RBAC_ROLE_LABELS = {
+  president: "代表",
+  vice_president: "副代表",
+  manager: "運営メンバー",
+  student: "在校生",
+  alumni: "OB・OG",
+  developer: "開発管理者",
+  guest: "未承認"
 };
 
-// 指定ロールが対象権限を持つか判定
+// 幹部・運営メンバー4役職の共通グループ
+const ADMIN_ROLES = ["president", "vice_president", "manager", "developer"];
+
+// 2. 各種権限と役職ごとの権限マトリクス定義（全19権限項目）
+const RBAC_PERMISSIONS = {
+  // --CSVダウンロード権限
+  csvDownload: ["president", "vice_president", "manager", "developer"],
+
+  // --メンバー管理権限
+  membersTabView: ["president", "vice_president", "manager", "developer"],           // メンバータブ閲覧
+  membersCardView: ["president", "vice_president", "manager", "developer"],          // メンバーカード閲覧
+  membersSearch: ["president", "vice_president", "manager", "developer"],            // メンバー検索
+  membersAdd: ["president", "vice_president", "manager", "developer"],               // メンバー追加
+  membersEdit: ["president", "vice_president", "manager", "developer"],              // メンバー情報編集
+  changeRoleToManager: ["president", "vice_president", "developer"],                 // 役職「運営メンバー」変更
+  changeRoleToVicePresident: ["vice_president", "developer"],                        // 役職「副代表」変更（※副代表・開発管理者のみ）
+  changeRoleToPresident: ["president", "vice_president", "developer"],               // 役職「代表」変更
+
+  // --タスク管理権限
+  tasksTabView: ["president", "vice_president", "manager", "developer"],             // タスクタブ閲覧
+  tasksSearch: ["president", "vice_president", "manager", "developer"],              // タスク検索
+  tasksEdit: ["president", "vice_president", "manager", "developer"],                // タスク追加・編集・削除
+
+  // --イベント管理権限
+  eventsTabView: ["president", "vice_president", "manager", "student", "alumni", "developer"],  // イベントタブ閲覧
+  eventsCardView: ["president", "vice_president", "manager", "student", "alumni", "developer"], // イベントカード閲覧
+  eventsSearch: ["president", "vice_president", "manager", "student", "alumni", "developer"],   // イベント検索
+  eventsEdit: ["president", "vice_president", "manager", "developer"],                          // イベント追加・編集・削除
+
+  // --出欠調整権限
+  attendanceTabView: ["president", "vice_president", "manager", "student", "developer"],        // 出欠調整タブ閲覧
+  attendanceInput: ["president", "vice_president", "manager", "student", "developer"],          // 出欠調整一括入力・変更
+  attendanceManageDates: ["president", "vice_president", "manager", "developer"],               // 出欠調整対象月の追加/候補日の追加・削除
+
+  // 後方互換エイリアス
+  membersView: ["president", "vice_president", "manager", "developer"],
+  tasksAll: ["president", "vice_president", "manager", "developer"],
+  eventsView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
+  attendanceViewAndInput: ["president", "vice_president", "manager", "student", "developer"]
+};
+
+// 指定ロール（内部コードまたは日本語役職名）が対象権限を持つか判定
 function hasPermission(userRole, permissionKey) {
+  const normalizedRole =
+    RBAC_ROLES.includes(userRole) ? userRole : mapMemberRoleToRbacRole(userRole);
   const allowed = RBAC_PERMISSIONS[permissionKey] || [];
-  return allowed.includes(userRole);
+  return allowed.includes(normalizedRole);
 }
 
 // メンバー編集画面で特定の「役職（日本語表示名）」への変更権限があるか判定
@@ -81,7 +108,7 @@ function canAssignMemberRole(userRole, targetRoleLabel) {
 async function signInWithGoogle() {
   if (!supabaseClient) {
     alert(
-      "Supabaseの接続URL（SUPABASE_URL / SUPABASE_ANON_KEY）が未設定です。\n画面上部の「🔐 現在のロール(RBAC)」プルダウンから各ロールの表示制御を直接テストできます。"
+      "Supabaseの接続URL（SUPABASE_URL / SUPABASE_ANON_KEY）が未設定です。\n画面上部の「🔐 現在の役職(RBAC)」プルダウンから各ロールの表示制御を直接テストできます。"
     );
     return;
   }
@@ -218,10 +245,10 @@ function applyRbacUi(userRole = state.userRole) {
 
   // 1. 各タブの閲覧権限判定
   const tabAccess = {
-    members: hasPermission(validRole, "membersView"),
-    tasks: hasPermission(validRole, "tasksAll"),
-    events: hasPermission(validRole, "eventsView"),
-    attendance: hasPermission(validRole, "attendanceViewAndInput")
+    members: hasPermission(validRole, "membersTabView"),
+    tasks: hasPermission(validRole, "tasksTabView"),
+    events: hasPermission(validRole, "eventsTabView"),
+    attendance: hasPermission(validRole, "attendanceTabView")
   };
 
   // 下部ナビゲーションタブの表示/非表示とグリッド列数の自動調整
@@ -239,7 +266,7 @@ function applyRbacUi(userRole = state.userRole) {
       visibleTabCount > 0 ? `repeat(${visibleTabCount}, 1fr)` : "1fr";
   }
 
-  // 2. ヘッダーボタン（CSV/DBモーダル、Googleフォーム連携モーダル）の表示制御
+  // 2. ヘッダーボタン（CSVダウンロード / DBモーダル、Googleフォーム連携モーダル）の表示制御
   const btnOpenDbModal = document.getElementById("btnOpenDbModal");
   const btnDownloadCsv = document.getElementById("btnDownloadCsv");
   const btnOpenSyncModal = document.getElementById("btnOpenSyncModal");
@@ -251,7 +278,7 @@ function applyRbacUi(userRole = state.userRole) {
     btnDownloadCsv.style.display = hasPermission(validRole, "csvDownload") ? "inline-block" : "none";
   }
   if (btnOpenSyncModal) {
-    btnOpenSyncModal.style.display = hasPermission(validRole, "membersEdit") ? "inline-flex" : "none";
+    btnOpenSyncModal.style.display = hasPermission(validRole, "membersAdd") ? "inline-flex" : "none";
   }
 
   // DBプレビューモーダル内のシート切替タブも権限に応じて制御
@@ -270,7 +297,7 @@ function applyRbacUi(userRole = state.userRole) {
       renderView();
       return;
     } else {
-      // guest（未承認）など、閲覧可能なタブが1つもない場合
+      // 閲覧可能なタブが1つもない場合（未承認 guest 等）
       const titleEl = document.getElementById("currentViewTitle");
       const countEl = document.getElementById("currentViewCount");
       const contentEl = document.getElementById("viewContent");
@@ -280,7 +307,7 @@ function applyRbacUi(userRole = state.userRole) {
       const eventsToggleWrap = document.getElementById("eventsViewToggleWrap");
 
       if (titleEl) titleEl.textContent = "アクセス権限の確認中";
-      if (countEl) countEl.textContent = "guest（未承認）";
+      if (countEl) countEl.textContent = "未承認";
       if (toolbar) toolbar.style.display = "none";
       if (fab) fab.style.display = "none";
       if (btnClearTab) btnClearTab.style.display = "none";
@@ -288,10 +315,10 @@ function applyRbacUi(userRole = state.userRole) {
       if (contentEl) {
         contentEl.innerHTML = `
           <div class="empty-state">
-            <h3 style="color: var(--text-main); margin-bottom: 8px;">🔒 アカウント承認待ち（guest）</h3>
+            <h3 style="color: var(--text-main); margin-bottom: 8px;">🔒 アカウント承認待ち</h3>
             <p style="font-size: 0.88rem; line-height: 1.6;">
-              現在あなたのロールは <strong>guest（未承認）</strong> に設定されています。<br />
-              代表・副代表・運営メンバーまたは開発管理者によるロール承認が完了するまでお待ちください。
+              現在あなたのアカウントには役職がまだ割り当てられていません。<br />
+              Googleフォームへの名簿登録、または代表・副代表・運営メンバー・開発管理者による承認が完了するまでお待ちください。
             </p>
           </div>
         `;
@@ -300,29 +327,60 @@ function applyRbacUi(userRole = state.userRole) {
     }
   }
 
-  // 4. 表示中ビューに応じた追加ボタン（FAB）・一括削除ボタン・編集ボタン等の出し分け
+  // 4. 表示中ビューに応じた検索欄・カード閲覧・追加ボタン（FAB）・編集・削除ボタン等の出し分け
   const fab = document.getElementById("btnAddRecord");
   const btnClearTab = document.getElementById("btnClearCurrentTab");
+  const searchBox = document.querySelector(".search-box");
+  const dynamicFilters = document.getElementById("dynamicFilters");
 
   if (state.currentView === "members") {
+    const canSearchMember = hasPermission(validRole, "membersSearch");
+    const canCardViewMember = hasPermission(validRole, "membersCardView");
+    const canAddMember = hasPermission(validRole, "membersAdd");
     const canEditMember = hasPermission(validRole, "membersEdit");
-    if (fab) fab.style.display = canEditMember ? "flex" : "none";
+
+    if (searchBox) searchBox.style.display = canSearchMember ? "block" : "none";
+    if (dynamicFilters) dynamicFilters.style.display = canSearchMember ? "flex" : "none";
+    if (fab) fab.style.display = canAddMember ? "flex" : "none";
+
     const btnDirectAdd = document.getElementById("btnDirectAddMember");
-    if (btnDirectAdd) btnDirectAdd.style.display = canEditMember ? "inline-block" : "none";
+    if (btnDirectAdd) btnDirectAdd.style.display = canAddMember ? "inline-block" : "none";
+
+    const syncBanner = document.querySelector(".sync-banner");
+    if (syncBanner) syncBanner.style.display = canAddMember || canEditMember ? "flex" : "none";
+
+    document.querySelectorAll("[data-member-detail]").forEach(card => {
+      card.style.display = canCardViewMember ? "flex" : "none";
+    });
   } else if (state.currentView === "tasks") {
-    const canEditTask = hasPermission(validRole, "tasksAll");
+    const canSearchTask = hasPermission(validRole, "tasksSearch");
+    const canEditTask = hasPermission(validRole, "tasksEdit");
+
+    if (searchBox) searchBox.style.display = canSearchTask ? "block" : "none";
+    if (dynamicFilters) dynamicFilters.style.display = canSearchTask ? "flex" : "none";
     if (fab) fab.style.display = canEditTask ? "flex" : "none";
     if (btnClearTab) {
       btnClearTab.style.display = canEditTask && db.tasks.length > 0 ? "inline-block" : "none";
     }
+    document.querySelectorAll("[data-quick-status]").forEach(sel => {
+      sel.style.display = canEditTask ? "inline-block" : "none";
+    });
   } else if (state.currentView === "events") {
+    const canSearchEvent = hasPermission(validRole, "eventsSearch");
+    const canCardViewEvent = hasPermission(validRole, "eventsCardView");
     const canEditEvent = hasPermission(validRole, "eventsEdit");
+
+    if (searchBox) searchBox.style.display = canSearchEvent ? "block" : "none";
+    if (dynamicFilters) dynamicFilters.style.display = canSearchEvent ? "flex" : "none";
     if (fab) fab.style.display = canEditEvent ? "flex" : "none";
     if (btnClearTab) {
       btnClearTab.style.display = canEditEvent && db.events.length > 0 ? "inline-block" : "none";
     }
+    document.querySelectorAll("[data-event-detail]").forEach(card => {
+      card.style.display = canCardViewEvent ? "flex" : "none";
+    });
   } else if (state.currentView === "attendance") {
-    const canInputAttendance = hasPermission(validRole, "attendanceViewAndInput");
+    const canInputAttendance = hasPermission(validRole, "attendanceInput");
     const canManageDates = hasPermission(validRole, "attendanceManageDates");
     if (fab) fab.style.display = canInputAttendance ? "flex" : "none";
     if (btnClearTab) btnClearTab.style.display = canManageDates ? "inline-block" : "none";
@@ -331,6 +389,10 @@ function applyRbacUi(userRole = state.userRole) {
     const btnManageDates = document.getElementById("btnManageDates");
     if (btnAddMonthQuick) btnAddMonthQuick.style.display = canManageDates ? "inline-block" : "none";
     if (btnManageDates) btnManageDates.style.display = canManageDates ? "inline-block" : "none";
+
+    document.querySelectorAll("[data-bulk-member], [data-cell-member]").forEach(el => {
+      el.style.pointerEvents = canInputAttendance ? "auto" : "none";
+    });
   }
 
   // 5. 開いている詳細モーダル内の「✏️ 編集」「削除」ボタン制御
@@ -341,7 +403,7 @@ function applyRbacUi(userRole = state.userRole) {
   } else if (state.modalMode === "eventDetail" && btnSwitchToEdit) {
     btnSwitchToEdit.style.display = hasPermission(validRole, "eventsEdit") ? "inline-flex" : "none";
   } else if (state.modalMode === "taskDetail") {
-    const canEditTask = hasPermission(validRole, "tasksAll");
+    const canEditTask = hasPermission(validRole, "tasksEdit");
     if (btnSwitchToEdit) btnSwitchToEdit.style.display = canEditTask ? "inline-flex" : "none";
     if (btnDeleteRecord) btnDeleteRecord.style.display = canEditTask ? "inline-block" : "none";
   }
@@ -569,7 +631,7 @@ let state = {
   editingSysId: null,
   modalMode: "record", // "record" | "bulkAttendance" | "manageDates"
   activeDbSheet: "members",
-  userRole: "developer", // RBACロール（developer | president | vice_president | manager | student | alumni | guest）
+  userRole: "developer", // RBACロール（president | vice_president | manager | student | alumni | developer | guest）
   currentUser: null
 };
 
@@ -1375,6 +1437,7 @@ function renderView() {
       document.getElementById("btnEmptyDirectAdd")?.addEventListener("click", () => openFormModal(null));
       document.getElementById("btnBannerOpenSync")?.addEventListener("click", openSyncModal);
       document.getElementById("btnBannerSyncNow")?.addEventListener("click", () => syncFromGoogleSheetUrl(db.sheetSyncUrl, false));
+      applyRbacUi(state.userRole);
       return;
     }
 
@@ -1441,6 +1504,7 @@ function renderView() {
 
     if (filtered.length === 0) {
       contentEl.innerHTML = `<div class="empty-state">該当するタスクがありません（進捗フィルターのチェック状態または検索ワードをご確認ください）。</div>`;
+      applyRbacUi(state.userRole);
       return;
     }
 
@@ -1515,6 +1579,7 @@ function renderView() {
 
     if (filtered.length === 0) {
       contentEl.innerHTML = `<div class="empty-state">該当するイベント企画がありません（ステータスフィルターのチェック状態または検索ワードをご確認ください）。</div>`;
+      applyRbacUi(state.userRole);
       return;
     }
 
@@ -3490,7 +3555,7 @@ document.addEventListener("DOMContentLoaded", () => {
     applyRbacUi(role);
     renderFilters();
     renderView();
-    if (db.sheetSyncUrl && hasPermission(state.userRole, "membersView")) {
+    if (db.sheetSyncUrl && hasPermission(state.userRole, "membersTabView")) {
       syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
     }
   });
