@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>教職の森 運営管理アプリ</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Supabase JS SDK (v2) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="mobile-preview-mode">
+  <!-- PC上でスマホ表示/PC表示およびRBACロール検証を切り替えるプレビューバー（実機のスマホ幅では自動非表示） -->
+  <div class="preview-mode-bar" role="region" aria-label="画面表示モード・RBACロール切替" style="flex-wrap: wrap;">
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <span class="preview-mode-label">表示モード:</span>
+      <div class="preview-mode-toggle">
+        <button type="button" class="preview-mode-btn active" data-device="mobile">
+          📱 スマホ画面（AppSheet風）
+        </button>
+        <button type="button" class="preview-mode-btn" data-device="desktop">
+          💻 PCワイド画面
+        </button>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+      <label for="rbacRoleSwitcher" class="preview-mode-label">🔐 現在のロール(RBAC):</label>
+      <select
+        id="rbacRoleSwitcher"
+        style="background: #1e293b; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 4px 8px; font-size: 0.78rem; font-weight: 700; cursor: pointer;"
+        title="ロールを切り替えてUI表示/非表示（RBAC）の動作を確認できます"
+      >
+        <option value="developer">developer（開発管理者）</option>
+        <option value="president">president（代表）</option>
+        <option value="vice_president">vice_president（副代表）</option>
+        <option value="manager">manager（運営メンバー）</option>
+        <option value="student">student（在校生）</option>
+        <option value="alumni">alumni（OB・OG）</option>
+        <option value="guest">guest（未承認）</option>
+      </select>
+      <button
+        type="button"
+        id="btnGoogleAuth"
+        class="preview-mode-btn"
+        style="background: #2563eb; color: #fff; padding: 4px 10px;"
+      >
+        🔑 Googleログイン
+      </button>
+    </div>
+  </div>
+
+  <!-- Smartphone Frame Wrapper -->
+  <div class="device-frame" id="deviceFrame">
+    <!-- Phone Status Bar (visible in mobile-preview-mode) -->
+    <div class="phone-status-bar" aria-hidden="true">
+      <span class="phone-time">9:41</span>
+      <div class="phone-notch"></div>
+      <span class="phone-icons">📶 5G 🔋</span>
+    </div>
+
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">🌲</div>
+        <div>
+          <span class="brand-title">教職の森 運営管理アプリ</span>
+          <span class="brand-subtitle">学生団体 幹部・運営メンバー用</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="btn-header" id="btnOpenSyncModal" title="Googleフォームの回答スプレッドシートと連携・同期する">
+          🔗 <span class="btn-header-text">フォーム連携</span>
+        </button>
+        <button type="button" class="btn-header" id="btnOpenDbModal" title="スプレッドシートDB構造の確認・CSV出力">
+          📊 <span class="btn-header-text">DB / CSV</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Scrollable App Viewport -->
+    <div class="phone-viewport">
+      <!-- Main Content -->
+      <main class="app-container">
+        <div class="view-header">
+          <div class="view-title-group">
+            <h1 class="view-title" id="currentViewTitle">メンバー</h1>
+            <span class="view-count" id="currentViewCount">0件</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <button
+              type="button"
+              class="btn btn-danger"
+              id="btnClearCurrentTab"
+              style="padding: 5px 10px; font-size: 0.76rem;"
+            >
+              🗑️ 全件削除
+            </button>
+            <div id="eventsViewToggleWrap" style="display: none;">
+              <div class="view-toggle" role="group" aria-label="表示形式切替">
+                <button type="button" class="view-toggle-btn active" data-layout="list">📋 リスト</button>
+                <button type="button" class="view-toggle-btn" data-layout="deck">🃏 カード</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Search & Filter Bar -->
+        <div class="toolbar-controls">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input
+              type="search"
+              id="searchInput"
+              class="search-input"
+              placeholder="検索"
+            />
+          </div>
+          <div id="dynamicFilters" style="display: flex; gap: 6px; flex-wrap: wrap; width: 100%;"></div>
+        </div>
+
+        <!-- View Content Container -->
+        <section id="viewContent" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <!-- Floating Action Button -->
+    <button type="button" class="fab" id="btnAddRecord">
+      <span>＋</span>
+      <span id="fabLabel">メンバー追加</span>
+    </button>
+
+    <!-- Bottom Navigation (AppSheet Primary Views) -->
+    <nav class="bottom-nav" aria-label="メインナビゲーション">
+      <div class="bottom-nav-inner">
+        <button type="button" class="nav-item active" data-view="members">
+          <span class="nav-icon">👥</span>
+          <span>メンバー</span>
+        </button>
+        <button type="button" class="nav-item" data-view="tasks">
+          <span class="nav-icon">✅</span>
+          <span>タスク</span>
+        </button>
+        <button type="button" class="nav-item" data-view="events">
+          <span class="nav-icon">📅</span>
+          <span>イベント</span>
+        </button>
+        <button type="button" class="nav-item" data-view="attendance">
+          <span class="nav-icon">🗓️</span>
+          <span>出欠調整</span>
+        </button>
+      </div>
+    </nav>
+
+    <!-- Phone Home Indicator -->
+    <div class="phone-home-bar" aria-hidden="true"></div>
+  </div>
+
+  <!-- Create / Edit / Detail Modal -->
+  <div class="modal-backdrop" id="formModal" role="dialog" aria-modal="true" aria-labelledby="formModalTitle">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2 class="modal-title" id="formModalTitle">新規登録</h2>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button
+            type="button"
+            class="btn-icon"
+            id="btnSwitchToEdit"
+            style="display: none; font-weight: 700; color: var(--primary-dark); border-color: var(--primary); background: #fff;"
+          >
+            ✏️ 編集
+          </button>
+          <button type="button" class="modal-close" id="btnCloseFormModal" aria-label="閉じる">×</button>
+        </div>
+      </div>
+      <form id="recordForm">
+        <div class="modal-body" id="formModalBody"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-danger" id="btnDeleteRecord" style="display: none;">削除</button>
+          <div class="footer-right">
+            <button type="button" class="btn btn-secondary" id="btnCancelForm">キャンセル</button>
+            <button type="submit" class="btn btn-primary" id="btnSubmitForm">保存</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- DB Structure & CSV Export Modal -->
+  <div class="modal-backdrop" id="dbModal" role="dialog" aria-modal="true" aria-labelledby="dbModalTitle">
+    <div class="modal-panel modal-wide">
+      <div class="modal-header">
+        <h2 class="modal-title" id="dbModalTitle">📊 教職の森_運営管理アプリDB（スプレッドシート構造プレビュー）</h2>
+        <button type="button" class="modal-close" id="btnCloseDbModal" aria-label="閉じる">×</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 0.84rem; color: var(--text-muted); line-height: 1.5;">
+          要件定義書に基づき、アプリ画面上では非表示（<code>SHOW? = false</code>）に設定されている
+          <strong>システムID</strong> 列を含めた、Googleスプレッドシート上の実データ構造を確認・CSV出力できます。
+          （※「在籍ステータス」列は物理削除済み）
+        </p>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div class="view-toggle" id="dbSheetTabs">
+            <button type="button" class="view-toggle-btn active" data-sheet="members">メンバー</button>
+            <button type="button" class="view-toggle-btn" data-sheet="tasks">タスク</button>
+            <button type="button" class="view-toggle-btn" data-sheet="events">イベント</button>
+            <button type="button" class="view-toggle-btn" data-sheet="attendance">月別出欠</button>
+          </div>
+          <button type="button" class="btn btn-primary" id="btnDownloadCsv">⬇️ 表示中のシートをCSVダウンロード</button>
+        </div>
+        <div class="db-table-wrap" id="dbTableContainer"></div>
+      </div>
+      <div class="modal-footer">
+        <div class="footer-right">
+          <button type="button" class="btn btn-secondary" id="btnCloseDbModalFooter">閉じる</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Google Form / Spreadsheet Sync Modal -->
+  <div class="modal-backdrop" id="syncModal" role="dialog" aria-modal="true" aria-labelledby="syncModalTitle">
+    <div class="modal-panel modal-wide">
+      <div class="modal-header">
+        <h2 class="modal-title" id="syncModalTitle">🔗 Googleフォーム回答の自動連携設定</h2>
+        <button type="button" class="modal-close" id="btnCloseSyncModal" aria-label="閉じる">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="privacy-box" style="background: #f0fdf4; border-color: #bbf7d0; color: #166534;">
+          <strong>💡 なぜ連携設定が必要？</strong><br />
+          Googleフォーム（<a href="https://forms.gle/3qK6Dyzrwr1ZJYTh8" target="_blank" rel="noopener noreferrer" style="color:#15803d; font-weight:700;">メンバー登録フォーム ↗</a>）に送信された回答は、Googleフォーム側の「回答先スプレッドシート」に保存されます。<br />
+          下記の<strong>方法A（URL自動同期）</strong>または<strong>方法B（CSVファイル取込）</strong>を行うことで、フォームで回答されたメンバー（学籍番号・名前・入学年度・Discord・希望教科）が自動的にこのアプリへ反映されます！
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="sheetUrlInput">
+            方法A：回答先GoogleスプレッドシートのURLでリアルタイム同期 <span class="req-tag" style="background:#dcfce7; color:#166534;">おすすめ</span>
+          </label>
+          <p class="form-hint" style="line-height: 1.5; margin-bottom: 4px;">
+            1. Googleフォーム編集画面の「回答」タブ ＞「スプレッドシートにリンク」を開きます。<br />
+            2. スプレッドシート右上の「共有」ボタンから、一般的なアクセスを<strong>「リンクを知っている全員（閲覧者）」</strong>に変更します。<br />
+            3. アドレスバーの通常URL（<code>https://docs.google.com/spreadsheets/d/.../edit</code>）をコピーして下に貼り付け、「🔄 URLを保存して今すぐ同期」を押してください。
+          </p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <input
+              type="url"
+              id="sheetUrlInput"
+              class="form-control"
+              style="flex: 1; min-width: 240px;"
+              placeholder="https://docs.google.com/spreadsheets/d/xxxx.../edit"
+            />
+            <button type="button" class="btn btn-primary" id="btnSyncFromSheetUrl">
+              🔄 URLを保存して今すぐ同期
+            </button>
+          </div>
+          <div id="syncStatusMsg" style="font-size: 0.82rem; font-weight: 600; margin-top: 4px;"></div>
+        </div>
+
+        <hr style="border: none; border-top: 1px solid var(--border);" />
+
+        <div class="form-group">
+          <label class="form-label" for="csvFileInput">
+            方法B：Googleフォーム回答CSVファイルを直接読み込む（共有設定不要）
+          </label>
+          <p class="form-hint">
+            Googleフォームまたはスプレッドシートからダウンロードした <code>.csv</code> ファイルを選択すると、即座にメンバー一覧へ取り込みます（学籍番号が同じデータは上書き更新され、アプリ側で設定した「役職」は維持されます）。
+          </p>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <input type="file" id="csvFileInput" accept=".csv,text/csv" class="form-control" style="max-width: 340px;" />
+            <button type="button" class="btn btn-secondary" id="btnImportCsvFile">
+              📥 CSVファイルを取り込む
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="footer-right">
+          <button type="button" class="btn btn-secondary" id="btnCloseSyncModalFooter">閉じる</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
