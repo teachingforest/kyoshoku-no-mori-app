@@ -1,25 +1,30 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」機能搭載)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」+ Supabase RBAC自動連携)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v4";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
+// GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
+// デプロイ後に発行される「https://script.google.com/macros/s/xxxx/exec」を設定してください。
+// 空文字のままの場合、スプレッドシート側の更新はスキップされます（Supabaseの権限更新は行われます）。
+const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
+
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
 // ==========================================================
-const SUPABASE_URL = window.SUPABASE_URL || "https://YOUR_PROJECT_ID.supabase.co";
+const SUPABASE_URL = window.SUPABASE_URL || "https://taeqrjfoxcdtelvayqcl.supabase.co";
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
 
 const supabaseClient =
   window.supabase &&
   SUPABASE_URL.startsWith("http") &&
-  !SUPABASE_URL.includes("YOUR_PROJECT_ID")
+  !SUPABASE_URL.includes("YOUR_PROJECT_ID") &&
+  !SUPABASE_ANON_KEY.includes("YOUR_SUPABASE_ANON_KEY")
     ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
 
-// 1. 役職（ロール）の再定義（内部ロール値 & 日本語役職名の相互マッピング）
-// 再定義された6役職: 「代表」「副代表」「運営メンバー」「在校生」「OB・OG」「開発管理者」（※未ログイン・未照合時のみ内部状態として guest を保持）
+// 1. 役職（ロール）の定義（内部ロール値 & 日本語役職名の相互マッピング）
 const RBAC_ROLES = [
   "president",      // 代表
   "vice_president", // 副代表
@@ -40,48 +45,40 @@ const RBAC_ROLE_LABELS = {
   guest: "未承認"
 };
 
-// 幹部・運営メンバー4役職の共通グループ
 const ADMIN_ROLES = ["president", "vice_president", "manager", "developer"];
 
-// 2. 各種権限と役職ごとの権限マトリクス定義（全19権限項目）
+// 2. 各種権限と役職ごとの権限マトリクス定義
 const RBAC_PERMISSIONS = {
-  // --CSVダウンロード権限
   csvDownload: ["president", "vice_president", "manager", "developer"],
 
-  // --メンバー管理権限
-  membersTabView: ["president", "vice_president", "manager", "developer"],           // メンバータブ閲覧
-  membersCardView: ["president", "vice_president", "manager", "developer"],          // メンバーカード閲覧
-  membersSearch: ["president", "vice_president", "manager", "developer"],            // メンバー検索
-  membersAdd: ["president", "vice_president", "manager", "developer"],               // メンバー追加
-  membersEdit: ["president", "vice_president", "manager", "developer"],              // メンバー情報編集
-  changeRoleToManager: ["president", "vice_president", "developer"],                 // 役職「運営メンバー」変更
-  changeRoleToVicePresident: ["vice_president", "developer"],                        // 役職「副代表」変更（※副代表・開発管理者のみ）
-  changeRoleToPresident: ["president", "vice_president", "developer"],               // 役職「代表」変更
+  membersTabView: ["president", "vice_president", "manager", "developer"],
+  membersCardView: ["president", "vice_president", "manager", "developer"],
+  membersSearch: ["president", "vice_president", "manager", "developer"],
+  membersAdd: ["president", "vice_president", "manager", "developer"],
+  membersEdit: ["president", "vice_president", "manager", "developer"],
+  changeRoleToManager: ["president", "vice_president", "developer"],
+  changeRoleToVicePresident: ["vice_president", "developer"],
+  changeRoleToPresident: ["president", "vice_president", "developer"],
 
-  // --タスク管理権限
-  tasksTabView: ["president", "vice_president", "manager", "developer"],             // タスクタブ閲覧
-  tasksSearch: ["president", "vice_president", "manager", "developer"],              // タスク検索
-  tasksEdit: ["president", "vice_president", "manager", "developer"],                // タスク追加・編集・削除
+  tasksTabView: ["president", "vice_president", "manager", "developer"],
+  tasksSearch: ["president", "vice_president", "manager", "developer"],
+  tasksEdit: ["president", "vice_president", "manager", "developer"],
 
-  // --イベント管理権限
-  eventsTabView: ["president", "vice_president", "manager", "student", "alumni", "developer"],  // イベントタブ閲覧
-  eventsCardView: ["president", "vice_president", "manager", "student", "alumni", "developer"], // イベントカード閲覧
-  eventsSearch: ["president", "vice_president", "manager", "student", "alumni", "developer"],   // イベント検索
-  eventsEdit: ["president", "vice_president", "manager", "developer"],                          // イベント追加・編集・削除
+  eventsTabView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
+  eventsCardView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
+  eventsSearch: ["president", "vice_president", "manager", "student", "alumni", "developer"],
+  eventsEdit: ["president", "vice_president", "manager", "developer"],
 
-  // --出欠調整権限
-  attendanceTabView: ["president", "vice_president", "manager", "student", "developer"],        // 出欠調整タブ閲覧
-  attendanceInput: ["president", "vice_president", "manager", "student", "developer"],          // 出欠調整一括入力・変更
-  attendanceManageDates: ["president", "vice_president", "manager", "developer"],               // 出欠調整対象月の追加/候補日の追加・削除
+  attendanceTabView: ["president", "vice_president", "manager", "student", "developer"],
+  attendanceInput: ["president", "vice_president", "manager", "student", "developer"],
+  attendanceManageDates: ["president", "vice_president", "manager", "developer"],
 
-  // 後方互換エイリアス
   membersView: ["president", "vice_president", "manager", "developer"],
   tasksAll: ["president", "vice_president", "manager", "developer"],
   eventsView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
   attendanceViewAndInput: ["president", "vice_president", "manager", "student", "developer"]
 };
 
-// 指定ロール（内部コードまたは日本語役職名）が対象権限を持つか判定
 function hasPermission(userRole, permissionKey) {
   const normalizedRole =
     RBAC_ROLES.includes(userRole) ? userRole : mapMemberRoleToRbacRole(userRole);
@@ -89,19 +86,21 @@ function hasPermission(userRole, permissionKey) {
   return allowed.includes(normalizedRole);
 }
 
-// メンバー編集画面で特定の「役職（日本語表示名）」への変更権限があるか判定
-function canAssignMemberRole(userRole, targetRoleLabel) {
-  if (targetRoleLabel === "代表") {
-    return hasPermission(userRole, "changeRoleToPresident");
+// 特定の役職への変更権限があるか判定（Supabase側の public.can_assign_role() と同一ロジック）
+function canAssignMemberRole(userRole, targetRole) {
+  const target = RBAC_ROLES.includes(targetRole) ? targetRole : mapMemberRoleToRbacRole(targetRole);
+  switch (target) {
+    case "developer":
+      return userRole === "developer";
+    case "president":
+      return hasPermission(userRole, "changeRoleToPresident");
+    case "vice_president":
+      return hasPermission(userRole, "changeRoleToVicePresident");
+    case "manager":
+      return hasPermission(userRole, "changeRoleToManager");
+    default:
+      return hasPermission(userRole, "membersEdit");
   }
-  if (targetRoleLabel === "副代表") {
-    return hasPermission(userRole, "changeRoleToVicePresident");
-  }
-  if (targetRoleLabel === "運営メンバー") {
-    return hasPermission(userRole, "changeRoleToManager");
-  }
-  // 「在校生」「OB・OG」はメンバー編集権限を持つロール（developer, president, vice_president, manager）なら変更可
-  return hasPermission(userRole, "membersEdit");
 }
 
 // Googleログイン実行（Supabase OAuth）
@@ -133,7 +132,7 @@ async function signOutUser() {
   applyRbacUi(state.userRole);
 }
 
-// 名簿データ（db.members）の役職表記を Supabase profiles.role の内部ロール値に変換するヘルパー関数
+// 名簿データ（db.members）の役職表記を Supabase profiles.role の内部ロール値に変換する
 function mapMemberRoleToRbacRole(memberRole) {
   const normalized = String(memberRole ?? "").trim();
   const roleMap = {
@@ -150,7 +149,6 @@ function mapMemberRoleToRbacRole(memberRole) {
     "OB・OG": "alumni",
     "alumni": "alumni"
   };
-  // 名簿側に役職が設定されていればそれを使用し、未設定または該当なしの場合は「在校生（student）」とする
   return roleMap[normalized] || "student";
 }
 
@@ -158,7 +156,6 @@ function mapMemberRoleToRbacRole(memberRole) {
 // 取得した自身のロールが guest だった場合、db.members のメールアドレスと照合して自動でロールを付与する
 async function fetchCurrentUserRole() {
   if (!supabaseClient) {
-    // Supabase未接続環境（ローカルプレビュー時）はプルダウン選択値または developer を使用
     return state.userRole || "developer";
   }
 
@@ -188,7 +185,6 @@ async function fetchCurrentUserRole() {
 
     // 取得した自身のロールが guest だった場合、Googleフォーム（db.members）のメールアドレスと照合して自動昇格
     if (currentRole === "guest" && state.currentUser.email) {
-      // スプレッドシート連携URLが設定されていれば、照合前に最新回答を db.members に同期しておく
       if (db.sheetSyncUrl) {
         try {
           const rows = await loadGoogleSheetViaJsonp(db.sheetSyncUrl);
@@ -204,7 +200,6 @@ async function fetchCurrentUserRole() {
       );
 
       if (matchedMember) {
-        // 名簿データ側に役職が設定されていればそれ（例: 運営メンバー -> manager）、なければ「在校生（student）」
         const assignedRole = mapMemberRoleToRbacRole(matchedMember.role);
 
         const { error: updateErr } = await supabaseClient
@@ -214,7 +209,6 @@ async function fetchCurrentUserRole() {
 
         if (!updateErr) {
           state.userRole = assignedRole;
-          // UPDATE成功後、UIを再描画して自動的に管理者または一般メンバーの画面を表示させる
           applyRbacUi(assignedRole);
           renderFilters();
           renderView();
@@ -232,18 +226,148 @@ async function fetchCurrentUserRole() {
   }
 }
 
+// ==========================================================
+// 管理者による他メンバーの役職（ロール）変更 → Supabase profiles.role へ自動反映
+// ==========================================================
+
+function rbacRoleToLabel(role) {
+  return RBAC_ROLE_LABELS[role] || role;
+}
+
+function normalizeEmail(email) {
+  return String(email ?? "").trim().toLowerCase();
+}
+
+// 管理者が他メンバーの役職を変更した際に、Supabase の profiles.role を email で特定して更新する非同期関数
+async function updateMemberRole(targetEmail, newRole, options = {}) {
+  const { previousRole = null, silent = false } = options;
+  const email = normalizeEmail(targetEmail);
+  const nextRbacRole = RBAC_ROLES.includes(newRole) ? newRole : mapMemberRoleToRbacRole(newRole);
+  const nextLabel = rbacRoleToLabel(nextRbacRole);
+  const notify = msg => {
+    if (!silent) alert(msg);
+  };
+
+  // 1. フロント側の事前権限チェック
+  if (
+    !canAssignMemberRole(state.userRole, nextRbacRole) ||
+    (previousRole && !canAssignMemberRole(state.userRole, previousRole))
+  ) {
+    notify("更新に失敗しました：現在のあなたの役職では、この役職変更を行う権限がありません。");
+    return { ok: false, reason: "forbidden" };
+  }
+
+  // 2. 対象メンバーのメールアドレスを確認（.eq("email", email) で特定するため必須）
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    notify("更新に失敗しました：対象メンバーのメールアドレスが未登録のため、Supabaseのアカウントを特定できません。");
+    return { ok: false, reason: "no_email" };
+  }
+
+  if (!supabaseClient) {
+    notify(`Supabase未接続のため、アプリ内の名簿のみ「${nextLabel}」に更新しました（ローカルプレビューモード）。`);
+    return { ok: true, reason: "offline" };
+  }
+
+  try {
+    // 3. 対象ユーザーが Supabase の profiles テーブルに存在するか確認
+    const { data: found, error: findErr } = await supabaseClient
+      .from("profiles")
+      .select("id, role")
+      .eq("email", email);
+
+    if (findErr) throw findErr;
+
+    if (!found || found.length === 0) {
+      const sheetResult = await syncRoleToSpreadsheet(email, nextLabel);
+      notify(
+        `「${email}」はまだアプリにログインしていないため、Supabase上のアカウントがありません。\n` +
+          "アプリ内の名簿の役職を更新しました（本人が初回ログインした際に自動的にこの役職が付与されます）。" +
+          (sheetResult.message ? `\n※${sheetResult.message}` : "")
+      );
+      return { ok: true, reason: "not_registered" };
+    }
+
+    // 4. email カラムで対象ユーザーを特定して role を UPDATE
+    const { data: updated, error: updateErr } = await supabaseClient
+      .from("profiles")
+      .update({ role: nextRbacRole })
+      .eq("email", email)
+      .select("id, role");
+
+    if (updateErr) throw updateErr;
+
+    if (!updated || updated.length === 0) {
+      notify("更新に失敗しました：Supabase側の権限（RLSポリシー）により役職の変更が拒否されました。");
+      return { ok: false, reason: "rls_denied" };
+    }
+
+    // 自分自身の役職を変更した場合は即時UIへ反映
+    if (state.currentUser && updated.some(row => row.id === state.currentUser.id)) {
+      state.userRole = nextRbacRole;
+    }
+
+    // 5. スプレッドシート（Googleフォーム回答）側の「役職」列も同時に更新（GAS Webhook設定時）
+    const sheetResult = await syncRoleToSpreadsheet(email, nextLabel);
+
+    notify(
+      `権限を更新しました（${email} → ${nextLabel}）` +
+        (sheetResult.message ? `\n※${sheetResult.message}` : "")
+    );
+    return { ok: true, reason: "updated" };
+  } catch (err) {
+    console.error("Failed to update member role in profiles:", err);
+    notify(`更新に失敗しました：${err?.message || err}`);
+    return { ok: false, reason: "error" };
+  }
+}
+
+// スプレッドシート（Googleフォーム回答シート）の「役職」列を GAS Webhook 経由で書き換えるプレースホルダー関数
+async function syncRoleToSpreadsheet(email, roleLabel) {
+  if (!GAS_ROLE_WEBHOOK_URL) {
+    return {
+      ok: false,
+      message: "スプレッドシート側の「役職」列は未更新です（同時更新する場合は GAS_ROLE_WEBHOOK_URL を設定してください）。"
+    };
+  }
+
+  try {
+    let accessToken = "";
+    if (supabaseClient) {
+      const {
+        data: { session }
+      } = await supabaseClient.auth.getSession();
+      accessToken = session?.access_token || "";
+    }
+
+    await fetch(GAS_ROLE_WEBHOOK_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ email, role: roleLabel, accessToken })
+    });
+
+    return { ok: true, message: "スプレッドシートの役職列へも更新リクエストを送信しました。" };
+  } catch (err) {
+    console.error("Failed to sync role to spreadsheet:", err);
+    return { ok: false, message: `スプレッドシートの役職更新に失敗しました（${err?.message || err}）。` };
+  }
+}
+
 // 取得した role に基づき、タブやボタンの表示/非表示を一括制御する関数
 function applyRbacUi(userRole = state.userRole) {
   const validRole = RBAC_ROLES.includes(userRole) ? userRole : "guest";
   state.userRole = validRole;
 
-  // 上部ロール検証セレクターの表示同期
   const switcher = document.getElementById("rbacRoleSwitcher");
   if (switcher && switcher.value !== validRole) {
     switcher.value = validRole;
   }
 
-  // 1. 各タブの閲覧権限判定
+  const authBtn = document.getElementById("btnGoogleAuth");
+  if (authBtn) {
+    authBtn.textContent = state.currentUser ? "🚪 ログアウト" : "🔑 Googleログイン";
+  }
+
   const tabAccess = {
     members: hasPermission(validRole, "membersTabView"),
     tasks: hasPermission(validRole, "tasksTabView"),
@@ -251,7 +375,6 @@ function applyRbacUi(userRole = state.userRole) {
     attendance: hasPermission(validRole, "attendanceTabView")
   };
 
-  // 下部ナビゲーションタブの表示/非表示とグリッド列数の自動調整
   let visibleTabCount = 0;
   document.querySelectorAll(".bottom-nav .nav-item").forEach(btn => {
     const viewName = btn.dataset.view;
@@ -266,7 +389,6 @@ function applyRbacUi(userRole = state.userRole) {
       visibleTabCount > 0 ? `repeat(${visibleTabCount}, 1fr)` : "1fr";
   }
 
-  // 2. ヘッダーボタン（CSVダウンロード / DBモーダル、Googleフォーム連携モーダル）の表示制御
   const btnOpenDbModal = document.getElementById("btnOpenDbModal");
   const btnDownloadCsv = document.getElementById("btnDownloadCsv");
   const btnOpenSyncModal = document.getElementById("btnOpenSyncModal");
@@ -281,14 +403,12 @@ function applyRbacUi(userRole = state.userRole) {
     btnOpenSyncModal.style.display = hasPermission(validRole, "membersAdd") ? "inline-flex" : "none";
   }
 
-  // DBプレビューモーダル内のシート切替タブも権限に応じて制御
   document.querySelectorAll("#dbSheetTabs .view-toggle-btn").forEach(btn => {
     const s = btn.dataset.sheet;
     const allowed = Boolean(tabAccess[s]);
     btn.style.display = allowed ? "inline-block" : "none";
   });
 
-  // 3. 現在開いているタブに対する閲覧権限がない場合、許可されている最初のタブへ自動遷移
   if (!tabAccess[state.currentView]) {
     const firstAllowedView = Object.keys(tabAccess).find(k => tabAccess[k]);
     if (firstAllowedView) {
@@ -297,7 +417,6 @@ function applyRbacUi(userRole = state.userRole) {
       renderView();
       return;
     } else {
-      // 閲覧可能なタブが1つもない場合（未承認 guest 等）
       const titleEl = document.getElementById("currentViewTitle");
       const countEl = document.getElementById("currentViewCount");
       const contentEl = document.getElementById("viewContent");
@@ -327,7 +446,6 @@ function applyRbacUi(userRole = state.userRole) {
     }
   }
 
-  // 4. 表示中ビューに応じた検索欄・カード閲覧・追加ボタン（FAB）・編集・削除ボタン等の出し分け
   const fab = document.getElementById("btnAddRecord");
   const btnClearTab = document.getElementById("btnClearCurrentTab");
   const searchBox = document.querySelector(".search-box");
@@ -395,7 +513,6 @@ function applyRbacUi(userRole = state.userRole) {
     });
   }
 
-  // 5. 開いている詳細モーダル内の「✏️ 編集」「削除」ボタン制御
   const btnSwitchToEdit = document.getElementById("btnSwitchToEdit");
   const btnDeleteRecord = document.getElementById("btnDeleteRecord");
   if (state.modalMode === "memberDetail" && btnSwitchToEdit) {
@@ -409,10 +526,8 @@ function applyRbacUi(userRole = state.userRole) {
   }
 }
 
-// 幹部管理用「役職」選択肢（要件定義書 3.1）
 const ROLE_OPTIONS = ["代表", "副代表", "運営メンバー", "在校生", "OB・OG"];
 
-// Googleフォーム「入学年度」選択肢（2023年度〜2030年度）
 const YEAR_OPTIONS = [
   "2023年度",
   "2024年度",
@@ -424,7 +539,6 @@ const YEAR_OPTIONS = [
   "2030年度"
 ];
 
-// Googleフォーム「希望教科」選択肢（複数選択可 / AppSheet: EnumList）
 const SUBJECT_OPTIONS = [
   "中学校 社会",
   "高等学校 地理歴史",
@@ -442,7 +556,6 @@ const STATUS_OPTIONS = ["未着手", "進行中", "保留", "完了"];
 const EVENT_STATUS_OPTIONS = ["開催", "終了"];
 const MARK_OPTIONS = ["◯", "△", "✕"];
 
-// 今日の日付（ローカルタイム YYYY-MM-DD）を取得
 function getTodayIsoString() {
   const now = new Date();
   const y = now.getFullYear();
@@ -451,7 +564,6 @@ function getTodayIsoString() {
   return `${y}-${m}-${d}`;
 }
 
-// イベントの開催日が今日より前（日付を超えた）なら自動で「終了」、それ以外は「開催」を返す（自動更新）
 function getAutoEventStatus(ev) {
   if (!ev) return "開催";
   const todayIso = getTodayIsoString();
@@ -463,26 +575,22 @@ function getAutoEventStatus(ev) {
   return ev.status;
 }
 
-// 全イベントのステータスを現在日付に基づいて自動更新
 function refreshAllEventStatuses(eventsList = []) {
   if (!Array.isArray(eventsList)) return;
   eventsList.forEach(ev => getAutoEventStatus(ev));
 }
 
-// AppSheetのUNIQUEID()相当（8文字16進数）
 function generateUniqueId() {
   return Array.from({ length: 8 }, () =>
     Math.floor(Math.random() * 16).toString(16)
   ).join("");
 }
 
-// AppSheetの自動採番式: "T" & RIGHT("0000" & (COUNT(タスク[システムID]) + 1), 4)
 function generateSequentialId(prefix, count) {
   const numStr = "0000" + (count + 1);
   return prefix + numStr.slice(-4);
 }
 
-// 既存のイベント一覧から重複しない次のイベントID（E0001〜）を採番
 function generateNextEventId(eventsList = []) {
   let maxNum = eventsList.length;
   eventsList.forEach(ev => {
@@ -496,7 +604,6 @@ function generateNextEventId(eventsList = []) {
   return "E" + numStr.slice(-4);
 }
 
-// YYYY-MM-DD から "M/D (曜) 17:30〜" のような出欠表用ラベルを生成
 function formatDateLabelFromIso(isoDate, timeSuffix = "17:30〜") {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate || "";
   const [y, m, d] = isoDate.split("-").map(Number);
@@ -506,7 +613,6 @@ function formatDateLabelFromIso(isoDate, timeSuffix = "17:30〜") {
   return timeSuffix ? `${m}/${d} (${w}) ${timeSuffix}` : `${m}/${d} (${w})`;
 }
 
-// YYYY-MM-DD を「○○○○年○○月○○日」（数字を少し大きく強調したHTML）にフォーマット
 function formatEventDateHtml(isoDate) {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
     return `<span style="color: var(--text-muted); font-weight: 600;">開催日未定</span>`;
@@ -515,7 +621,6 @@ function formatEventDateHtml(isoDate) {
   return `<span class="date-num">${escapeHtml(y)}</span><span class="date-unit">年</span><span class="date-num">${escapeHtml(m)}</span><span class="date-unit">月</span><span class="date-num">${escapeHtml(d)}</span><span class="date-unit">日</span>`;
 }
 
-// "11/4 (水) 16:30〜" などのラベルと対象月 "2026-11" から "2026-11-04" を推定
 function inferIsoDateFromLabel(ym, dateLabel) {
   if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return "";
   const [y, m] = ym.split("-").map(Number);
@@ -533,7 +638,8 @@ const DEFAULT_DB = {
     {
       sysId: "m2301196",
       studentId: "2301196",
-      name: "樋下田　大地",
+      name: "樋下田 大地",
+      email: "",
       role: "在校生",
       admissionYear: "2023年度",
       discordName: "ひげた",
@@ -548,50 +654,14 @@ const DEFAULT_DB = {
     { sysId: "t505c9d0", taskId: "T0005", taskName: "OB・OG座談会 講師依頼メール送信", status: "保留" }
   ],
   events: [
-    {
-      sysId: "e100a0b1",
-      eventId: "E0001",
-      eventName: "定例ミーティング",
-      eventDate: "2026-11-04"
-    },
-    {
-      sysId: "e101f2a3",
-      eventId: "E0002",
-      eventName: "新入生向け 教職履修相談会",
-      eventDate: "2026-11-11"
-    },
-    {
-      sysId: "e202b4c5",
-      eventId: "E0003",
-      eventName: "第1回 模擬授業実践ワークショップ",
-      eventDate: "2026-11-18"
-    },
-    {
-      sysId: "e303d6e7",
-      eventId: "E0004",
-      eventName: "現役教員OB・OGを囲む座談会",
-      eventDate: "2026-11-25"
-    },
-    {
-      sysId: "e401c1d2",
-      eventId: "E0005",
-      eventName: "教採対策 勉強会①",
-      eventDate: "2026-12-02"
-    },
-    {
-      sysId: "e402c3d4",
-      eventId: "E0006",
-      eventName: "模擬授業 振り返り会",
-      eventDate: "2026-12-09"
-    },
-    {
-      sysId: "e403c5d6",
-      eventId: "E0007",
-      eventName: "年内最終 定例会・交流会",
-      eventDate: "2026-12-16"
-    }
+    { sysId: "e100a0b1", eventId: "E0001", eventName: "定例ミーティング", eventDate: "2026-11-04" },
+    { sysId: "e101f2a3", eventId: "E0002", eventName: "新入生向け 教職履修相談会", eventDate: "2026-11-11" },
+    { sysId: "e202b4c5", eventId: "E0003", eventName: "第1回 模擬授業実践ワークショップ", eventDate: "2026-11-18" },
+    { sysId: "e303d6e7", eventId: "E0004", eventName: "現役教員OB・OGを囲む座談会", eventDate: "2026-11-25" },
+    { sysId: "e401c1d2", eventId: "E0005", eventName: "教採対策 勉強会①", eventDate: "2026-12-02" },
+    { sysId: "e402c3d4", eventId: "E0006", eventName: "模擬授業 振り返り会", eventDate: "2026-12-09" },
+    { sysId: "e403c5d6", eventId: "E0007", eventName: "年内最終 定例会・交流会", eventDate: "2026-12-16" }
   ],
-  // 調整さん風「ひと月ごと」の出欠管理データ（イベントと双方向連携）
   monthlySchedules: {
     "2026-11": {
       monthKey: "2026-11",
@@ -619,19 +689,19 @@ const DEFAULT_DB = {
 
 let db = loadDb();
 let state = {
-  currentView: "members", // "members" | "tasks" | "events" | "attendance"
-  eventsLayout: "list",   // "list" | "deck"（リストをデフォルト）
+  currentView: "members",
+  eventsLayout: "list",
   selectedMonth: "2026-11",
   searchQuery: "",
   roleFilter: "ALL",
   yearFilter: "ALL",
   subjectFilter: "ALL",
-  statusFilters: [...STATUS_OPTIONS], // 複数選択対応（初期状態は全ステータス選択）
-  eventStatusFilters: [...EVENT_STATUS_OPTIONS], // イベントステータス複数選択フィルタ（「開催」「終了」）
+  statusFilters: [...STATUS_OPTIONS],
+  eventStatusFilters: [...EVENT_STATUS_OPTIONS],
   editingSysId: null,
-  modalMode: "record", // "record" | "bulkAttendance" | "manageDates"
+  modalMode: "record",
   activeDbSheet: "members",
-  userRole: "developer", // RBACロール（president | vice_president | manager | student | alumni | developer | guest）
+  userRole: "developer",
   currentUser: null
 };
 
@@ -667,7 +737,6 @@ function saveDb() {
 // 「イベント」と「出欠調整」の双方向連携ロジック
 // ==========================================================
 
-// 指定した月シートの日程を日付昇順でソート
 function sortSheetDates(sheet) {
   if (!sheet || !Array.isArray(sheet.dates)) return;
   sheet.dates.sort((a, b) => {
@@ -677,11 +746,9 @@ function sortSheetDates(sheet) {
   });
 }
 
-// 「イベント」から「出欠調整」へ1件のイベントを同期（追加・更新・月移動・日付クリアに対応）
 function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db) {
   if (!ev || !ev.sysId) return;
 
-  // 以前の日付があり、日付がクリアされた・または別の月に変わった場合は旧月の日程から除去
   if (previousEventDate && previousEventDate !== ev.eventDate) {
     const oldYm = previousEventDate.slice(0, 7);
     const newYm = ev.eventDate ? ev.eventDate.slice(0, 7) : "";
@@ -691,7 +758,6 @@ function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db)
     }
   }
 
-  // 開催日が未設定になった場合は全月から紐づく日程を除去して終了
   if (!ev.eventDate || !/^\d{4}-\d{2}-\d{2}$/.test(ev.eventDate)) {
     removeEventFromMonthlySchedule(ev.sysId, targetDb);
     return;
@@ -700,7 +766,6 @@ function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db)
   const ym = ev.eventDate.slice(0, 7);
   const [y, m] = ym.split("-").map(Number);
 
-  // 該当月の出欠表がまだなければ自動作成
   if (!targetDb.monthlySchedules[ym]) {
     targetDb.monthlySchedules[ym] = {
       monthKey: ym,
@@ -711,7 +776,6 @@ function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db)
   }
 
   const sheet = targetDb.monthlySchedules[ym];
-  // 既にこのイベントに紐づいている日程、または同じ日付＆同タイトルの日程を探す
   let dateEntry = sheet.dates.find(d => d.eventSysId === ev.sysId);
   if (!dateEntry) {
     dateEntry = sheet.dates.find(d => {
@@ -741,7 +805,6 @@ function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db)
   sortSheetDates(sheet);
 }
 
-// イベント削除時に「出欠調整」の対応する候補日も削除
 function removeEventFromMonthlySchedule(eventSysId, targetDb = db) {
   if (!eventSysId || !targetDb.monthlySchedules) return;
   Object.values(targetDb.monthlySchedules).forEach(sheet => {
@@ -762,7 +825,6 @@ function removeEventFromMonthlySchedule(eventSysId, targetDb = db) {
   });
 }
 
-// 「出欠調整」で追加された候補日を「イベント」へ自動登録・紐づけ
 function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
   if (!dateObj) return;
   if (!dateObj.isoDate) {
@@ -772,7 +834,6 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     dateObj.dateLabel = formatDateLabelFromIso(dateObj.isoDate, "17:30〜");
   }
 
-  // 既にイベントと紐づいている場合はイベント側の名前・日付を最新化
   if (dateObj.eventSysId) {
     const linked = targetDb.events.find(e => e.sysId === dateObj.eventSysId);
     if (linked) {
@@ -782,7 +843,6 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     }
   }
 
-  // 同じ開催日＆イベント名の既存イベントがあればそれを紐づける
   const sameEvent = targetDb.events.find(
     e => e.eventDate === dateObj.isoDate && e.eventName === dateObj.title
   );
@@ -791,7 +851,6 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     return sameEvent;
   }
 
-  // 新規イベントとして db.events に追加
   const newEv = {
     sysId: "e_" + generateUniqueId(),
     eventId: generateNextEventId(targetDb.events),
@@ -804,17 +863,14 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
   return newEv;
 }
 
-// 対象月全体の「出欠調整」と「イベント」を双方向同期（月追加時などに呼び出し）
 function syncMonthScheduleAndEvents(ym, targetDb = db) {
   const sheet = targetDb.monthlySchedules[ym];
   if (!sheet) return;
 
-  // 1. その月のシートにある候補日をすべて db.events に同期
   sheet.dates.forEach(d => {
     syncScheduleDateToEvents(ym, d, targetDb);
   });
 
-  // 2. すでに db.events に登録されている同月のイベントがあればシートにも反映
   targetDb.events.forEach(ev => {
     if (ev.eventDate && ev.eventDate.startsWith(ym + "-")) {
       syncEventToMonthlySchedule(ev, null, targetDb);
@@ -824,13 +880,11 @@ function syncMonthScheduleAndEvents(ym, targetDb = db) {
   sortSheetDates(sheet);
 }
 
-// 起動時に既存の「イベント」と「出欠調整」を突合・双方向同期
 function reconcileEventsAndSchedules(targetDb = db) {
   if (!targetDb) return;
   if (!Array.isArray(targetDb.events)) targetDb.events = [];
   if (!targetDb.monthlySchedules) targetDb.monthlySchedules = {};
 
-  // まず各月シートの候補日に isoDate を補完し、同日のイベントまたは新規イベントと紐づけ
   Object.keys(targetDb.monthlySchedules).forEach(ym => {
     const sheet = targetDb.monthlySchedules[ym];
     if (!sheet || !Array.isArray(sheet.dates)) return;
@@ -839,7 +893,6 @@ function reconcileEventsAndSchedules(targetDb = db) {
         d.isoDate = inferIsoDateFromLabel(ym, d.dateLabel);
       }
       if (!d.eventSysId) {
-        // 同じ日付のイベントで、まだ他の日程から参照されていないものがあればリンク
         const candidateEv = targetDb.events.find(
           e =>
             e.eventDate === d.isoDate &&
@@ -855,7 +908,6 @@ function reconcileEventsAndSchedules(targetDb = db) {
     });
   });
 
-  // 次に開催日を持つすべてのイベントを出欠調整シートへ反映し、ステータスも自動更新
   targetDb.events.forEach(ev => {
     getAutoEventStatus(ev);
     if (ev.eventDate) {
@@ -868,22 +920,18 @@ function reconcileEventsAndSchedules(targetDb = db) {
 // Googleフォーム（回答先スプレッドシート / CSV）連携ロジック
 // ==========================================================
 
-// スプレッドシートの共有URLや公開URLからCSV取得用URLへ自動変換
 function buildCsvExportUrl(rawUrl) {
   const trimmed = (rawUrl || "").trim();
   if (!trimmed) return "";
 
-  // すでに output=csv または format=csv または tqx=out:csv が含まれている場合
   if (trimmed.includes("output=csv") || trimmed.includes("format=csv") || trimmed.includes("tqx=out:csv")) {
     return trimmed;
   }
 
-  // 「ウェブに公開」の /pubhtml URL の場合
   if (trimmed.includes("/spreadsheets/d/e/") && trimmed.includes("/pub")) {
     return trimmed.replace(/\/pubhtml.*$/, "/pub?output=csv").replace(/\/pub(\?.*)?$/, "/pub?output=csv");
   }
 
-  // 通常のGoogleスプレッドシートURL: https://docs.google.com/spreadsheets/d/{ID}/edit#gid={GID}
   const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   if (match) {
     const sheetId = match[1];
@@ -895,7 +943,6 @@ function buildCsvExportUrl(rawUrl) {
   return trimmed;
 }
 
-// RFC4180準拠CSVパーサー（Googleフォームの「希望教科」などカンマを含む引用符付きセルに完全対応）
 function parseCsvText(text) {
   const rows = [];
   let row = [];
@@ -945,7 +992,6 @@ function parseCsvText(text) {
   return rows.filter(r => r.some(c => c !== ""));
 }
 
-// 2次元配列（1行目＝ヘッダー、2行目以降＝データ）からメンバーを取り込み・マージする共通関数
 function mergeMembersFromRows(rows) {
   if (!rows || rows.length < 2) {
     throw new Error("回答データ行がまだありません（Googleフォームで1件以上回答を送信してから同期してください）。");
@@ -976,7 +1022,6 @@ function mergeMembersFromRows(rows) {
     const name = idxName >= 0 ? String(r[idxName] ?? "").trim() : "";
     const email = idxEmail >= 0 ? String(r[idxEmail] ?? "").trim().toLowerCase() : "";
     if (!studentId && !name && !email) continue;
-    // ヘッダー行がデータ行に混入している場合はスキップ
     if (
       studentId === "学籍番号" ||
       name === "名前" ||
@@ -997,7 +1042,6 @@ function mergeMembersFromRows(rows) {
       : [];
     const roleFromCsv = idxRole >= 0 ? String(r[idxRole] ?? "").trim() : "";
 
-    // 既存メンバーを学籍番号・メールアドレス・氏名で検索し、役職を維持したまま上書きマージ
     const existing = db.members.find(
       m =>
         (studentId && m.studentId === studentId) ||
@@ -1036,14 +1080,11 @@ function mergeMembersFromRows(rows) {
   return { addedCount, updatedCount, totalRows: rows.length - 1 };
 }
 
-// CSVテキスト（Googleフォーム回答シート）からメンバーを取り込み・マージする
 function mergeMembersFromCsvText(csvText) {
   const rows = parseCsvText(csvText);
   return mergeMembersFromRows(rows);
 }
 
-// ローカルファイル（file://）からでもCORSエラー（Failed to fetch）にならずに
-// Googleスプレッドシートのデータを取得できるJSONPローダー
 function loadGoogleSheetViaJsonp(rawUrl) {
   return new Promise((resolve, reject) => {
     const trimmed = (rawUrl || "").trim();
@@ -1105,7 +1146,6 @@ function loadGoogleSheetViaJsonp(rawUrl) {
         })
       );
 
-      // colsに「学籍番号」「名前」「メール」が入っている場合はcolsをヘッダー行として採用
       const hasColHeaders = cols.some(
         label =>
           label.includes("学籍番号") ||
@@ -1172,7 +1212,6 @@ async function syncFromGoogleSheetUrl(rawUrl, silent = false) {
   }
 }
 
-// バッジ用ヘルパー
 function getRoleBadgeClass(role) {
   switch (role) {
     case "代表": return "role-rep";
@@ -1337,7 +1376,6 @@ function renderFilters() {
   }
 }
 
-// レコード単体削除ヘルパー（メンバー削除時は月別出欠データからも回答を削除、イベント削除時は出欠調整の候補日も削除）
 function deleteRecordById(viewType, sysId) {
   if (viewType === "members") {
     db.members = db.members.filter(m => m.sysId !== sysId);
@@ -1365,7 +1403,6 @@ function renderView() {
   const contentEl = document.getElementById("viewContent");
   const q = state.searchQuery.trim().toLowerCase();
 
-  // ナビゲーションのアクティブ状態更新
   document.querySelectorAll(".nav-item").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.view === state.currentView);
   });
@@ -1378,13 +1415,13 @@ function renderView() {
       btnClearTab.style.display = "none";
     }
 
-    // システムIDは検索対象外（SHOW? = false）
     const filtered = db.members.filter(m => {
       const subjectsArr = Array.isArray(m.subjects) ? m.subjects : [];
       const matchSearch =
         !q ||
         (m.studentId || "").toLowerCase().includes(q) ||
         m.name.toLowerCase().includes(q) ||
+        (m.email || "").toLowerCase().includes(q) ||
         m.role.toLowerCase().includes(q) ||
         String(m.admissionYear).toLowerCase().includes(q) ||
         (m.discordName || "").toLowerCase().includes(q) ||
@@ -1481,7 +1518,6 @@ function renderView() {
       btnClearTab.style.display = db.tasks.length > 0 ? "inline-block" : "none";
     }
 
-    // システムIDは検索対象外、進捗フィルタは複数選択対応
     const filtered = db.tasks.filter(t => {
       const jpDue =
         t.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate)
@@ -1554,10 +1590,8 @@ function renderView() {
       btnClearTab.style.display = db.events.length > 0 ? "inline-block" : "none";
     }
 
-    // 描画前に全イベントのステータスを現在日付に基づき自動判定（開催日を超えたら自動で「終了」）
     refreshAllEventStatuses(db.events);
 
-    // システムIDは検索対象外、ステータスフィルタにも対応
     const filtered = db.events.filter(ev => {
       const evStatus = getAutoEventStatus(ev);
       const jpDate =
@@ -1656,7 +1690,6 @@ function renderView() {
     return;
   }
 
-  // イベントバインド（詳細ボタン、編集ボタン、直接削除ボタン、クイック進捗変更、出欠タブ遷移）
   contentEl.querySelectorAll("[data-task-detail]").forEach(btn => {
     btn.addEventListener("click", e => {
       e.stopPropagation();
@@ -1710,7 +1743,6 @@ function renderView() {
     });
   });
 
-  // 描画後にRBAC表示制御を適用
   applyRbacUi(state.userRole);
 }
 
@@ -1734,11 +1766,9 @@ function renderAttendanceView() {
   const dates = sheet ? sheet.dates : [];
   const responses = sheet ? sheet.responses : {};
 
-  // 回答済みメンバー数カウント
   const answeredCount = db.members.filter(m => responses[m.sysId]).length;
   countEl.textContent = `回答 ${answeredCount}/${db.members.length}名`;
 
-  // 各日程の◯カウントの最大値を計算（最多参加可能日をハイライトするため）
   let maxOkCount = 0;
   const dateStats = dates.map(d => {
     let ok = 0, maybe = 0, ng = 0;
@@ -1835,20 +1865,17 @@ function renderAttendanceView() {
     </div>
   `;
 
-  // 月の切り替え
   document.getElementById("monthSelect").addEventListener("change", e => {
     state.selectedMonth = e.target.value;
     renderAttendanceView();
   });
 
-  // メンバー名クリックでその人の一括変更モーダルを開く
   contentEl.querySelectorAll("[data-bulk-member]").forEach(btn => {
     btn.addEventListener("click", () => {
       openBulkAttendanceModal(btn.dataset.bulkMember);
     });
   });
 
-  // セル直接タップで「◯ → △ → ✕ → ◯」と即座に切り替え（途中変更のワンタップ操作）
   contentEl.querySelectorAll("[data-cell-member]").forEach(cell => {
     cell.addEventListener("click", () => {
       const mId = cell.dataset.cellMember;
@@ -1867,21 +1894,17 @@ function renderAttendanceView() {
     });
   });
 
-  // 対象月の追加モーダル
   document.getElementById("btnAddMonthQuick").addEventListener("click", () => {
     openAddMonthModal();
   });
 
-  // 日程・月の管理モーダル
   document.getElementById("btnManageDates").addEventListener("click", () => {
     openManageDatesModal();
   });
 
-  // 出欠調整画面の描画後にRBAC表示制御を適用
   applyRbacUi(state.userRole);
 }
 
-// 指定した年・月の特定曜日（複数選択可、例: [1, 3] = 月・水）の日付リストを自動生成するヘルパー
 function generateWeekdayDatesForMonth(year, month, targetDaysOfWeek = [3], defaultTime = "17:30〜", defaultTitle = "定例活動・模擬授業会") {
   const daysArray = Array.isArray(targetDaysOfWeek) ? targetDaysOfWeek.map(Number) : [Number(targetDaysOfWeek)];
   const dayNames = ["日", "月", "火", "水", "木", "金", "土"];
@@ -1904,7 +1927,6 @@ function generateWeekdayDatesForMonth(year, month, targetDaysOfWeek = [3], defau
   return result;
 }
 
-// モーダル内のヘッダー編集ボタン・フッター保存ボタンの表示状態をリセット
 function resetFormModalButtons(isDetailMode = false) {
   const btnSwitchToEdit = document.getElementById("btnSwitchToEdit");
   const btnSubmitForm = document.getElementById("btnSubmitForm");
@@ -1923,7 +1945,7 @@ function resetFormModalButtons(isDetailMode = false) {
   }
 }
 
-// メンバー詳細モーダルを開く（右上「✏️ 編集」ボタンから編集画面へ遷移）
+// メンバー詳細モーダルを開く（クイック役職変更＆「権限を更新する」ボタン搭載）
 function openMemberDetailModal(sysId) {
   const rec = db.members.find(m => m.sysId === sysId);
   if (!rec) return;
@@ -1941,6 +1963,8 @@ function openMemberDetailModal(sysId) {
   titleEl.textContent = "メンバー詳細";
 
   const subjectsArr = Array.isArray(rec.subjects) ? rec.subjects : [];
+  const canEditMember = hasPermission(state.userRole, "membersEdit");
+  const canChangeThisMemberRole = canAssignMemberRole(state.userRole, rec.role);
 
   bodyEl.innerHTML = `
     <div class="detail-hero">
@@ -1956,6 +1980,37 @@ function openMemberDetailModal(sysId) {
       </div>
     </div>
 
+    ${canEditMember ? `
+      <div class="detail-item" style="background: #f0fdf4; border-color: #bbf7d0;">
+        <div class="detail-label" style="color: #166534;">🔐 役職・Supabase権限の変更</div>
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px;">
+          <select
+            id="quickRoleSelect"
+            class="form-control"
+            style="flex: 1; min-width: 150px; font-weight: 700; background: #fff;"
+            ${!canChangeThisMemberRole ? "disabled title='現在のロールではこの上位役職を変更できません'" : ""}
+          >
+            ${ROLE_OPTIONS.map(r => {
+              const allowed = canAssignMemberRole(state.userRole, r);
+              const isCurrent = rec.role === r;
+              return `<option value="${r}" ${isCurrent ? "selected" : ""} ${!allowed && !isCurrent ? "disabled" : ""}>${r}${!allowed ? "（権限なし）" : ""}</option>`;
+            }).join("")}
+          </select>
+          <button
+            type="button"
+            class="btn btn-primary"
+            id="btnQuickUpdateRole"
+            ${!canChangeThisMemberRole ? "disabled" : ""}
+          >
+            権限を更新する
+          </button>
+        </div>
+        <div style="font-size: 0.74rem; color: #15803d; margin-top: 5px;">
+          ※「権限を更新する」を押すと、メールアドレス（${escapeHtml(rec.email || "未登録")}）をキーにSupabaseの <code>profiles.role</code> も自動変更されます。
+        </div>
+      </div>
+    ` : ""}
+
     <div class="detail-list">
       <div class="detail-item">
         <div class="detail-label">🪪 学籍番号</div>
@@ -1968,6 +2023,16 @@ function openMemberDetailModal(sysId) {
         <div class="detail-label">🎓 入学年度</div>
         <div class="detail-value">
           ${escapeHtml(rec.admissionYear || "未設定")}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📧 メールアドレス</div>
+        <div class="detail-value" style="word-break: break-all;">
+          ${rec.email
+            ? escapeHtml(rec.email)
+            : `<span style="color: var(--text-muted); font-weight: 400;">未登録（右上の「✏️ 編集」からメールアドレスを登録するとSupabase連携が可能です）</span>`
+          }
         </div>
       </div>
 
@@ -1992,11 +2057,51 @@ function openMemberDetailModal(sysId) {
     </div>
   `;
 
+  // 詳細モーダル内の「権限を更新する」ボタン押下イベント
+  document.getElementById("btnQuickUpdateRole")?.addEventListener("click", async () => {
+    const newRoleLabel = document.getElementById("quickRoleSelect")?.value;
+    if (!newRoleLabel || newRoleLabel === rec.role) {
+      alert("現在と同じ役職が選択されています。");
+      return;
+    }
+
+    const btn = document.getElementById("btnQuickUpdateRole");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "更新中...";
+    }
+
+    let result;
+    try {
+      result = await updateMemberRole(rec.email, newRoleLabel, { previousRole: rec.role });
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "権限を更新する";
+      }
+    }
+
+    if (!result.ok) {
+      if (result.reason === "no_email") {
+        if (!confirm("メールアドレスが未登録のためSupabaseのロールは更新できませんが、アプリ内の名簿の役職のみ変更しますか？")) {
+          return;
+        }
+      } else {
+        return;
+      }
+    }
+
+    rec.role = newRoleLabel;
+    saveDb();
+    renderFilters();
+    renderView();
+    openMemberDetailModal(sysId);
+  });
+
   applyRbacUi(state.userRole);
   modal.classList.add("open");
 }
 
-// タスク詳細モーダルを開く（右上「✏️ 編集」ボタンとフッター「削除」ボタンを統合）
 function openTaskDetailModal(sysId) {
   const rec = db.tasks.find(t => t.sysId === sysId);
   if (!rec) return;
@@ -2082,7 +2187,6 @@ function openTaskDetailModal(sysId) {
   modal.classList.add("open");
 }
 
-// イベント詳細モーダルを開く（右上「✏️ 編集」ボタンから編集・削除画面へ遷移）
 function openEventDetailModal(sysId) {
   const rec = db.events.find(ev => ev.sysId === sysId);
   if (!rec) return;
@@ -2099,7 +2203,6 @@ function openEventDetailModal(sysId) {
   btnDelete.style.display = "none";
   titleEl.textContent = "イベント詳細";
 
-  // 出欠調整タブで紐づいている日程・参加予定メンバーの内訳を取得
   let attendanceSummaryHtml = `<span style="color: var(--text-muted); font-weight: 400;">開催日未設定のため出欠表未連携</span>`;
   if (rec.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(rec.eventDate)) {
     const ym = rec.eventDate.slice(0, 7);
@@ -2232,7 +2335,6 @@ function openEventDetailModal(sysId) {
   modal.classList.add("open");
 }
 
-// 「＋ 対象月を追加」専用モーダル（ステップ1: 年月・曜日の選択 → ステップ2: 追加する日程をリストでチェック選択）
 function openAddMonthModal() {
   state.modalMode = "addMonth";
   state.pendingAddMonthData = null;
@@ -2293,7 +2395,6 @@ function openAddMonthModal() {
   modal.classList.add("open");
 }
 
-// ステップ2: 生成された候補日リストから実際に追加する日程をチェックボックスで選択する画面
 function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
   state.modalMode = "confirmMonthDates";
   state.pendingAddMonthData = { y, m, ym, candidateDates };
@@ -2360,7 +2461,6 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
     </div>
   `;
 
-  // タイトル入力欄をクリックした時にチェックボックスが反転しないようにする
   bodyEl.querySelectorAll("[data-candidate-title]").forEach(input => {
     input.addEventListener("click", e => e.stopPropagation());
   });
@@ -2384,7 +2484,6 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
   modal.classList.add("open");
 }
 
-// 調整さん風「ひと月分の一括出欠登録・途中変更」モーダル
 function openBulkAttendanceModal(defaultMemberSysId = null) {
   state.modalMode = "bulkAttendance";
   resetFormModalButtons(false);
@@ -2473,12 +2572,10 @@ function openBulkAttendanceModal(defaultMemberSysId = null) {
       </div>
     `;
 
-    // メンバー変更時に既存の回答内容を即座に再読込
     document.getElementById("bulkMemberSelect").addEventListener("change", e => {
       renderBulkFormForMember(e.target.value);
     });
 
-    // 個別の ◯ / △ / ✕ ボタン切替
     bodyEl.querySelectorAll(".mark-radio-btn").forEach(btn => {
       btn.addEventListener("click", () => {
         const dId = btn.dataset.dateId;
@@ -2488,7 +2585,6 @@ function openBulkAttendanceModal(defaultMemberSysId = null) {
       });
     });
 
-    // 「すべて◯ / △ / ✕」一括セットボタン
     bodyEl.querySelectorAll("[data-fill-all]").forEach(fillBtn => {
       fillBtn.addEventListener("click", () => {
         const targetVal = fillBtn.dataset.fillAll;
@@ -2503,7 +2599,6 @@ function openBulkAttendanceModal(defaultMemberSysId = null) {
   modal.classList.add("open");
 }
 
-// 幹部向け：月・候補日の追加/削除モーダル
 function openManageDatesModal() {
   state.modalMode = "manageDates";
   resetFormModalButtons(false);
@@ -2556,7 +2651,6 @@ function openManageDatesModal() {
     </div>
   `;
 
-  // 候補日削除（連動する「イベント」も削除）
   bodyEl.querySelectorAll("[data-del-date]").forEach(btn => {
     btn.addEventListener("click", () => {
       const dId = btn.dataset.delDate;
@@ -2576,7 +2670,6 @@ function openManageDatesModal() {
     });
   });
 
-  // 候補日追加（「イベント」にも自動追加・対象月シートへ同期）
   document.getElementById("btnAddCandidateDate").addEventListener("click", () => {
     const isoDate = document.getElementById("newDateIso").value.trim();
     const title = document.getElementById("newDateTitle").value.trim() || "サークル活動";
@@ -2609,7 +2702,6 @@ function openManageDatesModal() {
     renderAttendanceView();
   });
 
-  // 新規月作成（「イベント」にも自動連携）
   document.getElementById("btnCreateNewMonth").addEventListener("click", () => {
     const ym = document.getElementById("newMonthInput").value;
     if (!ym) return;
@@ -2640,7 +2732,6 @@ function openManageDatesModal() {
   modal.classList.add("open");
 }
 
-// 通常の登録・編集モーダルを開く
 function openFormModal(sysId = null) {
   if (state.currentView === "attendance") {
     openBulkAttendanceModal(null);
@@ -2663,6 +2754,7 @@ function openFormModal(sysId = null) {
       : {
           studentId: "",
           name: "",
+          email: "",
           role: "在校生",
           admissionYear: "2026年度",
           discordName: "",
@@ -2693,7 +2785,14 @@ function openFormModal(sysId = null) {
         <label class="form-label" for="fieldName">
           氏名（名前） <span class="req-tag">必須 (Required)</span>
         </label>
-        <input type="text" id="fieldName" class="form-control" required value="${escapeHtml(rec.name)}" placeholder="（例）流経　太郎" />
+        <input type="text" id="fieldName" class="form-control" required value="${escapeHtml(rec.name)}" placeholder="（例）流経 太郎" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="fieldEmail">
+          メールアドレス <span class="ro-tag">Googleログイン照合・権限更新に使用</span>
+        </label>
+        <input type="email" id="fieldEmail" class="form-control" value="${escapeHtml(rec.email || "")}" placeholder="例: ryukei.taro@example.com" />
       </div>
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
@@ -2708,7 +2807,7 @@ function openFormModal(sysId = null) {
 
         <div class="form-group">
           <label class="form-label" for="fieldRole">
-            役職 <span class="ro-tag">RBAC権限に応じた選択制御</span>
+            役職 <span class="ro-tag">変更するとSupabaseの権限も自動更新</span>
           </label>
           <select id="fieldRole" class="form-control" ${!canAssignMemberRole(state.userRole, rec.role) ? "disabled title='現在のロールではこの上位役職を変更できません'" : ""}>
             ${ROLE_OPTIONS.map(r => {
@@ -2755,13 +2854,11 @@ function openFormModal(sysId = null) {
       ? db.tasks.find(t => t.sysId === sysId)
       : { taskId: nextTaskId, taskName: "", status: "未着手", assignee: "", dueDate: "", memo: "" };
 
-    // 担当者候補リスト（登録メンバー名一覧 + 既存設定値）
     const memberNames = Array.from(new Set(db.members.map(m => m.name).filter(Boolean)));
     if (rec.assignee && !memberNames.includes(rec.assignee)) {
       memberNames.unshift(rec.assignee);
     }
 
-    // 期限（YYYY-MM-DD）の分解
     let dueY = "";
     let dueM = "";
     let dueD = "";
@@ -2920,7 +3017,6 @@ function closeFormModal() {
   state.editingSysId = null;
 }
 
-// スプレッドシートDBプレビュー＆CSV出力
 function renderDbTable() {
   const container = document.getElementById("dbTableContainer");
   const sheet = state.activeDbSheet;
@@ -2933,6 +3029,7 @@ function renderDbTable() {
             <th>システムID <span class="col-hidden-tag">SHOW?=false</span></th>
             <th>学籍番号</th>
             <th>氏名（名前）</th>
+            <th>メールアドレス</th>
             <th>役職</th>
             <th>入学年度</th>
             <th>Discordユーザー名</th>
@@ -2945,6 +3042,7 @@ function renderDbTable() {
               <td style="font-family: monospace; color: #64748b;">${escapeHtml(m.sysId)}</td>
               <td style="font-family: monospace;">${escapeHtml(m.studentId || "")}</td>
               <td>${escapeHtml(m.name)}</td>
+              <td>${escapeHtml(m.email || "")}</td>
               <td>${escapeHtml(m.role)}</td>
               <td>${escapeHtml(m.admissionYear)}</td>
               <td>${escapeHtml(m.discordName || "")}</td>
@@ -3053,11 +3151,12 @@ function downloadCurrentSheetCsv() {
   let filename = "";
 
   if (sheet === "members") {
-    headers = ["システムID", "学籍番号", "氏名", "役職", "入学年度", "Discordユーザー名", "希望教科"];
+    headers = ["システムID", "学籍番号", "氏名", "メールアドレス", "役職", "入学年度", "Discordユーザー名", "希望教科"];
     rows = db.members.map(m => [
       m.sysId,
       m.studentId || "",
       m.name,
+      m.email || "",
       m.role,
       m.admissionYear,
       m.discordName || "",
@@ -3133,7 +3232,6 @@ function closeSyncModal() {
 
 // 初期化処理
 document.addEventListener("DOMContentLoaded", () => {
-  // スマホ画面 / PCワイド画面 切替スイッチ
   document.querySelectorAll(".preview-mode-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const isMobile = btn.dataset.device === "mobile";
@@ -3144,7 +3242,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // 下部ナビゲーション切替
   document.querySelectorAll(".nav-item").forEach(btn => {
     btn.addEventListener("click", () => {
       state.currentView = btn.dataset.view;
@@ -3155,7 +3252,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // イベント表示形式（Deck / List）切替
   document.querySelectorAll("#eventsViewToggleWrap .view-toggle-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       state.eventsLayout = btn.dataset.layout;
@@ -3166,13 +3262,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // 検索ボックス
   document.getElementById("searchInput").addEventListener("input", e => {
     state.searchQuery = e.target.value;
     renderView();
   });
 
-  // FAB（新規追加ボタン：メンバー画面ではGoogleフォームへジャンプ）
   document.getElementById("btnAddRecord").addEventListener("click", () => {
     if (state.currentView === "members") {
       window.open(GOOGLE_FORM_URL, "_blank", "noopener,noreferrer");
@@ -3181,22 +3275,18 @@ document.addEventListener("DOMContentLoaded", () => {
     openFormModal(null);
   });
 
-  // フォームモーダル閉じる
   document.getElementById("btnCloseFormModal").addEventListener("click", closeFormModal);
   document.getElementById("btnCancelForm").addEventListener("click", closeFormModal);
 
-  // 詳細モーダル右上の「✏️ 編集」ボタンから編集フォームへ切り替え
   document.getElementById("btnSwitchToEdit")?.addEventListener("click", () => {
     if (state.editingSysId) {
       openFormModal(state.editingSysId);
     }
   });
 
-  // フォーム保存処理
-  document.getElementById("recordForm").addEventListener("submit", e => {
+  document.getElementById("recordForm").addEventListener("submit", async e => {
     e.preventDefault();
 
-    // 調整さん方式の一括出欠登録・上書き変更モード
     if (state.modalMode === "bulkAttendance") {
       const sheet = db.monthlySchedules[state.selectedMonth];
       const memberSysId = document.getElementById("bulkMemberSelect").value;
@@ -3249,7 +3339,6 @@ document.addEventListener("DOMContentLoaded", () => {
         ];
       }
 
-      // ステップ2（追加する日程をリスト表示してチェックボックスで選択する画面）へ遷移
       openConfirmMonthDatesModal(y, m, ym, candidateDates);
       return;
     }
@@ -3289,7 +3378,6 @@ document.addEventListener("DOMContentLoaded", () => {
         responses: {}
       };
 
-      // 選択された候補日を「イベント」へ自動追加＆同月の既存イベントも出欠表に反映
       syncMonthScheduleAndEvents(pending.ym);
 
       state.selectedMonth = pending.ym;
@@ -3310,6 +3398,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (state.currentView === "members") {
       const studentId = document.getElementById("fieldStudentId").value.trim();
       const name = document.getElementById("fieldName").value.trim();
+      const email = normalizeEmail(document.getElementById("fieldEmail")?.value);
       const role = document.getElementById("fieldRole").value;
       const admissionYear = document.getElementById("fieldYear").value;
       const discordName = document.getElementById("fieldDiscord").value.trim();
@@ -3328,8 +3417,29 @@ document.addEventListener("DOMContentLoaded", () => {
       if (sysId) {
         const target = db.members.find(m => m.sysId === sysId);
         if (target) {
+          // 役職が変更された場合は、Supabase の profiles.role も email で特定して自動更新
+          if (target.role !== role) {
+            const btnSubmit = document.getElementById("btnSubmitForm");
+            if (btnSubmit) btnSubmit.disabled = true;
+            let result;
+            try {
+              result = await updateMemberRole(email || target.email, role, { previousRole: target.role });
+            } finally {
+              if (btnSubmit) btnSubmit.disabled = false;
+            }
+
+            if (!result.ok) {
+              if (result.reason === "no_email") {
+                if (!confirm("Supabaseの権限は更新できませんが、アプリ内の名簿の役職のみ変更しますか？")) return;
+              } else {
+                return;
+              }
+            }
+          }
+
           target.studentId = studentId;
           target.name = name;
+          target.email = email;
           target.role = role;
           target.admissionYear = admissionYear;
           target.discordName = discordName;
@@ -3340,6 +3450,7 @@ document.addEventListener("DOMContentLoaded", () => {
           sysId: generateUniqueId(),
           studentId,
           name,
+          email,
           role,
           admissionYear,
           discordName,
@@ -3390,7 +3501,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const manualStatus = document.getElementById("fieldEventStatus")?.value || "開催";
       if (!eventName) return;
 
-      // 開催日が過去の場合は自動で「終了」、それ以外は選択値（デフォルト「開催」）
       const computedStatus =
         eventDate && /^\d{4}-\d{2}-\d{2}$/.test(eventDate) && eventDate < getTodayIsoString()
           ? "終了"
@@ -3423,7 +3533,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  // レコード削除処理（編集モーダル内）
   document.getElementById("btnDeleteRecord").addEventListener("click", () => {
     const sysId = state.editingSysId;
     if (!sysId) return;
@@ -3434,7 +3543,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  // 表示中タブのデータを一括削除するボタン
   document.getElementById("btnClearCurrentTab").addEventListener("click", () => {
     if (state.currentView === "members") {
       if (!confirm(`現在登録されているメンバー（${db.members.length}名）をすべて削除して空にしますか？`)) return;
@@ -3460,7 +3568,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  // Googleフォーム / スプレッドシート連携モーダル
   document.getElementById("btnOpenSyncModal")?.addEventListener("click", openSyncModal);
   document.getElementById("btnCloseSyncModal")?.addEventListener("click", closeSyncModal);
   document.getElementById("btnCloseSyncModalFooter")?.addEventListener("click", closeSyncModal);
@@ -3496,14 +3603,12 @@ document.addEventListener("DOMContentLoaded", () => {
     reader.readAsText(file, "UTF-8");
   });
 
-  // 別タブ（Googleフォーム）から戻ってきたときにスプレッドシートURLが設定済みなら自動同期
   window.addEventListener("focus", () => {
     if (db.sheetSyncUrl) {
       syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
     }
   });
 
-  // DB構造プレビューモーダル
   const dbModal = document.getElementById("dbModal");
   document.getElementById("btnOpenDbModal").addEventListener("click", () => {
     state.activeDbSheet = state.currentView;
@@ -3533,7 +3638,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btnDownloadCsv").addEventListener("click", downloadCurrentSheetCsv);
 
-  // 上部バーのRBACロール切替セレクター（検証・デモ用）
   document.getElementById("rbacRoleSwitcher")?.addEventListener("change", e => {
     const selectedRole = e.target.value;
     applyRbacUi(selectedRole);
@@ -3541,7 +3645,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  // Googleログインボタン
   document.getElementById("btnGoogleAuth")?.addEventListener("click", () => {
     if (state.currentUser) {
       signOutUser();
@@ -3550,7 +3653,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // 起動時に Supabase の profiles テーブルから自分の role を取得し、RBAC UI制御を適用
   fetchCurrentUserRole().then(role => {
     applyRbacUi(role);
     renderFilters();
