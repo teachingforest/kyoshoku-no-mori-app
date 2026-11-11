@@ -23,19 +23,18 @@
       </div>
     </div>
     <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-      <label for="rbacRoleSwitcher" class="preview-mode-label">🔐 現在のロール(RBAC):</label>
+      <label for="rbacRoleSwitcher" class="preview-mode-label">🔐 現在の役職(RBAC):</label>
       <select
         id="rbacRoleSwitcher"
         style="background: #1e293b; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; padding: 4px 8px; font-size: 0.78rem; font-weight: 700; cursor: pointer;"
-        title="ロールを切り替えてUI表示/非表示（RBAC）の動作を確認できます"
+        title="役職を切り替えてUI表示/非表示（RBAC）の動作を確認できます"
       >
-        <option value="developer">developer（開発管理者）</option>
-        <option value="president">president（代表）</option>
-        <option value="vice_president">vice_president（副代表）</option>
-        <option value="manager">manager（運営メンバー）</option>
-        <option value="student">student（在校生）</option>
-        <option value="alumni">alumni（OB・OG）</option>
-        <option value="guest">guest（未承認）</option>
+        <option value="developer">開発管理者 (developer)</option>
+        <option value="president">代表 (president)</option>
+        <option value="vice_president">副代表 (vice_president)</option>
+        <option value="manager">運営メンバー (manager)</option>
+        <option value="student">在校生 (student)</option>
+        <option value="alumni">OB・OG (alumni)</option>
       </select>
       <button
         type="button"
@@ -73,6 +72,9 @@
         <button type="button" class="btn-header" id="btnOpenDbModal" title="スプレッドシートDB構造の確認・CSV出力">
           📊 <span class="btn-header-text">DB / CSV</span>
         </button>
+        <button type="button" class="btn-header" id="btnHeaderAuth" title="Googleアカウントでログイン / ログアウト">
+          🔑 <span class="btn-header-text" id="btnHeaderAuthText">ログイン</span>
+        </button>
       </div>
     </header>
 
@@ -80,7 +82,7 @@
     <div class="phone-viewport">
       <!-- Main Content -->
       <main class="app-container">
-        <div class="view-header">
+        <div class="view-header" id="mainViewHeader">
           <div class="view-title-group">
             <h1 class="view-title" id="currentViewTitle">メンバー</h1>
             <span class="view-count" id="currentViewCount">0件</span>

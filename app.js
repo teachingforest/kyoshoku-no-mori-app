@@ -1,5 +1,5 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」+ Supabase RBAC自動連携)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」+ Supabase RBAC自動連携 + スマホ対応ログイン画面)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v4";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
@@ -321,7 +321,7 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
   }
 }
 
-// スプレッドシート（Googleフォーム回答シート）の「役職」列を GAS Webhook 経由で書き換えるプレースホルダー関数
+// スプレッドシート（Googleフォーム回答シート）の「役職」列を GAS Webhook 経由で書き換える関数
 async function syncRoleToSpreadsheet(email, roleLabel) {
   if (!GAS_ROLE_WEBHOOK_URL) {
     return {
@@ -353,7 +353,43 @@ async function syncRoleToSpreadsheet(email, roleLabel) {
   }
 }
 
-// 取得した role に基づき、タブやボタンの表示/非表示を一括制御する関数
+// ヘッダー右上にスマホでも使えるログイン/ログアウトボタンを自動確保・更新するヘルパー
+function updateHeaderAuthButtons() {
+  const authBtn = document.getElementById("btnGoogleAuth");
+  if (authBtn) {
+    authBtn.textContent = state.currentUser ? "🚪 ログアウト" : "🔑 Googleログイン";
+  }
+
+  // index.html 側に #btnHeaderAuth がない場合でも動的に追加して確実に表示する
+  let headerAuthBtn = document.getElementById("btnHeaderAuth");
+  const headerActions = document.querySelector(".header-actions");
+  if (!headerAuthBtn && headerActions) {
+    headerAuthBtn = document.createElement("button");
+    headerAuthBtn.type = "button";
+    headerAuthBtn.className = "btn-header";
+    headerAuthBtn.id = "btnHeaderAuth";
+    headerAuthBtn.addEventListener("click", () => {
+      if (state.currentUser) {
+        if (confirm("ログアウトしますか？")) signOutUser();
+      } else {
+        signInWithGoogle();
+      }
+    });
+    headerActions.appendChild(headerAuthBtn);
+  }
+
+  if (headerAuthBtn) {
+    if (state.currentUser) {
+      headerAuthBtn.innerHTML = `🚪 <span class="btn-header-text">ログアウト</span>`;
+      headerAuthBtn.title = `ログイン中: ${state.currentUser.email || ""}\nタップしてログアウト`;
+    } else {
+      headerAuthBtn.innerHTML = `🔑 <span class="btn-header-text">ログイン</span>`;
+      headerAuthBtn.title = "Googleアカウントでログイン";
+    }
+  }
+}
+
+// 取得した role に基づき、ログイン画面・タブ・ボタンの表示/非表示を一括制御する関数
 function applyRbacUi(userRole = state.userRole) {
   const validRole = RBAC_ROLES.includes(userRole) ? userRole : "guest";
   state.userRole = validRole;
@@ -363,10 +399,7 @@ function applyRbacUi(userRole = state.userRole) {
     switcher.value = validRole;
   }
 
-  const authBtn = document.getElementById("btnGoogleAuth");
-  if (authBtn) {
-    authBtn.textContent = state.currentUser ? "🚪 ログアウト" : "🔑 Googleログイン";
-  }
+  updateHeaderAuthButtons();
 
   const tabAccess = {
     members: hasPermission(validRole, "membersTabView"),
@@ -382,6 +415,11 @@ function applyRbacUi(userRole = state.userRole) {
     btn.style.display = allowed ? "flex" : "none";
     if (allowed) visibleTabCount++;
   });
+
+  const bottomNav = document.querySelector(".bottom-nav");
+  if (bottomNav) {
+    bottomNav.style.display = visibleTabCount > 0 ? "flex" : "none";
+  }
 
   const navInner = document.querySelector(".bottom-nav-inner");
   if (navInner) {
@@ -409,6 +447,7 @@ function applyRbacUi(userRole = state.userRole) {
     btn.style.display = allowed ? "inline-block" : "none";
   });
 
+  // 閲覧権限のあるタブにいない場合（または未ログイン・guestの場合）
   if (!tabAccess[state.currentView]) {
     const firstAllowedView = Object.keys(tabAccess).find(k => tabAccess[k]);
     if (firstAllowedView) {
@@ -425,22 +464,119 @@ function applyRbacUi(userRole = state.userRole) {
       const btnClearTab = document.getElementById("btnClearCurrentTab");
       const eventsToggleWrap = document.getElementById("eventsViewToggleWrap");
 
-      if (titleEl) titleEl.textContent = "アクセス権限の確認中";
-      if (countEl) countEl.textContent = "未承認";
       if (toolbar) toolbar.style.display = "none";
       if (fab) fab.style.display = "none";
       if (btnClearTab) btnClearTab.style.display = "none";
       if (eventsToggleWrap) eventsToggleWrap.style.display = "none";
+
+      // パターンA: まだGoogleログインしていない場合 → 「ログイン画面」を表示
+      if (!state.currentUser) {
+        if (titleEl) titleEl.textContent = "ログイン";
+        if (countEl) countEl.textContent = "未ログイン";
+        if (contentEl) {
+          contentEl.innerHTML = `
+            <div class="item-card" style="max-width: 440px; margin: 18px auto; padding: 28px 22px; text-align: center; align-items: center; gap: 16px;">
+              <div style="width: 64px; height: 64px; border-radius: 18px; background: var(--primary-pale); color: var(--primary-dark); display: flex; align-items: center; justify-content: center; font-size: 2rem; box-shadow: var(--shadow-sm);">
+                🌲
+              </div>
+              <div>
+                <h2 style="font-size: 1.2rem; font-weight: 800; color: var(--primary-dark); margin-bottom: 6px;">
+                  教職の森 運営管理アプリ
+                </h2>
+                <p style="font-size: 0.86rem; color: var(--text-muted); line-height: 1.6;">
+                  サークルメンバー専用の管理アプリです。<br />
+                  Googleフォームに登録した<strong>Googleアカウント（Gmail）</strong>でログインしてください。
+                </p>
+              </div>
+
+              <button
+                type="button"
+                id="btnMainLoginScreen"
+                class="btn btn-primary"
+                style="width: 100%; padding: 13px 18px; font-size: 0.98rem; font-weight: 700; border-radius: 10px; display: flex; align-items: center; justify-content: center; gap: 10px; box-shadow: var(--shadow-md);"
+              >
+                <span>🔑</span>
+                <span>Googleアカウントでログイン</span>
+              </button>
+
+              <div style="width: 100%; border-top: 1px solid var(--border); padding-top: 14px; font-size: 0.8rem; color: var(--text-muted); line-height: 1.5;">
+                まだメンバー名簿への登録がお済みでない方は、<br />
+                先に以下のフォームからご登録ください。<br />
+                <a
+                  href="${GOOGLE_FORM_URL}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style="display: inline-block; margin-top: 8px; color: var(--primary-dark); font-weight: 700; text-decoration: underline;"
+                >
+                  📝 教職の森 メンバー登録フォームを開く ↗
+                </a>
+              </div>
+            </div>
+          `;
+          document.getElementById("btnMainLoginScreen")?.addEventListener("click", signInWithGoogle);
+        }
+        return;
+      }
+
+      // パターンB: Googleログイン済みだが、ロールが guest（未承認）の場合
+      if (titleEl) titleEl.textContent = "アクセス権限の確認中";
+      if (countEl) countEl.textContent = "未承認";
       if (contentEl) {
         contentEl.innerHTML = `
-          <div class="empty-state">
-            <h3 style="color: var(--text-main); margin-bottom: 8px;">🔒 アカウント承認待ち</h3>
-            <p style="font-size: 0.88rem; line-height: 1.6;">
+          <div class="item-card" style="max-width: 460px; margin: 18px auto; padding: 26px 20px; text-align: center; align-items: center; gap: 14px;">
+            <div style="font-size: 2.2rem;">🔒</div>
+            <h3 style="color: var(--text-main); font-size: 1.1rem; font-weight: 800;">
+              アカウント承認待ち
+            </h3>
+            <div style="background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 0.82rem; color: var(--text-main); width: 100%; word-break: break-all;">
+              ログイン中: <strong>${escapeHtml(state.currentUser.email || "")}</strong>
+            </div>
+            <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.6;">
               現在あなたのアカウントには役職がまだ割り当てられていません。<br />
               Googleフォームへの名簿登録、または代表・副代表・運営メンバー・開発管理者による承認が完了するまでお待ちください。
             </p>
+            <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 4px;">
+              <button
+                type="button"
+                id="btnRetryRoleCheck"
+                class="btn btn-primary"
+                style="width: 100%; padding: 11px 16px; font-weight: 700;"
+              >
+                🔄 名簿と再照合して権限を確認する
+              </button>
+              <a
+                href="${GOOGLE_FORM_URL}"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-secondary"
+                style="width: 100%; padding: 10px 16px; text-decoration: none; text-align: center;"
+              >
+                📝 Googleフォームで名簿登録する ↗
+              </a>
+              <button
+                type="button"
+                id="btnGuestLogout"
+                class="btn btn-danger"
+                style="width: 100%; padding: 10px 16px; margin-top: 4px;"
+              >
+                🚪 ログアウト（別のGoogleアカウントに切替）
+              </button>
+            </div>
           </div>
         `;
+        document.getElementById("btnRetryRoleCheck")?.addEventListener("click", async e => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          btn.textContent = "⏳ 照合中...";
+          const role = await fetchCurrentUserRole();
+          applyRbacUi(role);
+          renderFilters();
+          renderView();
+          if (role === "guest") {
+            alert("まだ名簿（スプレッドシート）上に同じメールアドレスが見つからないか、承認が完了していません。");
+          }
+        });
+        document.getElementById("btnGuestLogout")?.addEventListener("click", signOutUser);
       }
       return;
     }
@@ -701,7 +837,7 @@ let state = {
   editingSysId: null,
   modalMode: "record",
   activeDbSheet: "members",
-  userRole: "developer",
+  userRole: supabaseClient ? "guest" : "developer",
   currentUser: null
 };
 
@@ -1214,6 +1350,7 @@ async function syncFromGoogleSheetUrl(rawUrl, silent = false) {
 
 function getRoleBadgeClass(role) {
   switch (role) {
+    case "開発管理者": return "role-rep";
     case "代表": return "role-rep";
     case "副代表": return "role-subrep";
     case "運営メンバー": return "role-exec";
@@ -2057,7 +2194,6 @@ function openMemberDetailModal(sysId) {
     </div>
   `;
 
-  // 詳細モーダル内の「権限を更新する」ボタン押下イベント
   document.getElementById("btnQuickUpdateRole")?.addEventListener("click", async () => {
     const newRoleLabel = document.getElementById("quickRoleSelect")?.value;
     if (!newRoleLabel || newRoleLabel === rec.role) {
@@ -3417,7 +3553,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (sysId) {
         const target = db.members.find(m => m.sysId === sysId);
         if (target) {
-          // 役職が変更された場合は、Supabase の profiles.role も email で特定して自動更新
           if (target.role !== role) {
             const btnSubmit = document.getElementById("btnSubmitForm");
             if (btnSubmit) btnSubmit.disabled = true;
@@ -3604,7 +3739,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   window.addEventListener("focus", () => {
-    if (db.sheetSyncUrl) {
+    if (db.sheetSyncUrl && state.currentUser && hasPermission(state.userRole, "membersTabView")) {
       syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
     }
   });
@@ -3645,14 +3780,35 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  document.getElementById("btnGoogleAuth")?.addEventListener("click", () => {
+  // 上部プレビューバーおよびスマホ対応ヘッダーのログイン/ログアウトボタン
+  const handleAuthButtonClick = () => {
     if (state.currentUser) {
-      signOutUser();
+      if (confirm("ログアウトしますか？")) signOutUser();
     } else {
       signInWithGoogle();
     }
-  });
+  };
+  document.getElementById("btnGoogleAuth")?.addEventListener("click", handleAuthButtonClick);
+  document.getElementById("btnHeaderAuth")?.addEventListener("click", handleAuthButtonClick);
 
+  // OAuthリダイレクト復帰時などのセッション変化も自動検知して画面を更新
+  if (supabaseClient) {
+    supabaseClient.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+        fetchCurrentUserRole().then(role => {
+          applyRbacUi(role);
+          renderFilters();
+          renderView();
+        });
+      } else if (event === "SIGNED_OUT") {
+        state.currentUser = null;
+        state.userRole = "guest";
+        applyRbacUi("guest");
+      }
+    });
+  }
+
+  // 初回起動時にロールを取得して描画
   fetchCurrentUserRole().then(role => {
     applyRbacUi(role);
     renderFilters();
