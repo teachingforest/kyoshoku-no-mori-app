@@ -8,7 +8,7 @@ const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwI
 // GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
 // デプロイ後に発行される「https://script.google.com/macros/s/xxxx/exec」を設定してください。
 // 空文字のままの場合、スプレッドシート側の更新はスキップされます（Supabaseの権限更新は行われます）。
-const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
+const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbxgZmvJ8dbXt-hFCMYzfuxaxp2OZSyUJQG_jWTwJergMUhPmELv4ID8vH4aN2bthguP/exec";
 
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
@@ -152,6 +152,77 @@ function mapMemberRoleToRbacRole(memberRole) {
   return roleMap[normalized] || "student";
 }
 
+function rbacRoleToLabel(role) {
+  return RBAC_ROLE_LABELS[role] || role;
+}
+
+function normalizeEmail(email) {
+  return String(email ?? "").trim().toLowerCase();
+}
+
+// ==========================================================
+// Supabase の profiles テーブルのロール情報を名簿（db.members）のカード表示へ紐づけて同期する関数
+// ==========================================================
+async function syncMemberRolesFromSupabase() {
+  if (!supabaseClient || !state.currentUser) return false;
+
+  try {
+    const { data: profiles, error } = await supabaseClient
+      .from("profiles")
+      .select("email, role");
+
+    if (error || !Array.isArray(profiles)) return false;
+
+    const emailToRoleMap = new Map();
+    profiles.forEach(p => {
+      const em = normalizeEmail(p.email);
+      if (em && p.role && RBAC_ROLES.includes(p.role) && p.role !== "guest") {
+        emailToRoleMap.set(em, p.role);
+      }
+    });
+
+    let changed = false;
+    const myEmail = normalizeEmail(state.currentUser.email);
+    const myRole = state.userRole;
+
+    // ログイン中の自分自身のメールアドレスがまだどのメンバーカードにも設定されていない場合、
+    // 初期カード（学籍番号 2301196）またはメールアドレス未設定の自分のカードに自動で紐づける
+    if (myEmail && !db.members.some(m => normalizeEmail(m.email) === myEmail)) {
+      const selfCandidate =
+        db.members.find(m => m.studentId === "2301196" && !normalizeEmail(m.email)) ||
+        (db.members.length === 1 && !normalizeEmail(db.members[0].email) ? db.members[0] : null);
+
+      if (selfCandidate) {
+        selfCandidate.email = myEmail;
+        changed = true;
+      }
+    }
+
+    // 各メンバーのメールアドレスと Supabase の profiles.email を照合し、役職ラベルを最新化
+    db.members.forEach(m => {
+      const memEmail = normalizeEmail(m.email);
+      if (!memEmail) return;
+
+      const supaRole = emailToRoleMap.get(memEmail) || (memEmail === myEmail ? myRole : null);
+      if (supaRole && supaRole !== "guest") {
+        const label = rbacRoleToLabel(supaRole);
+        if (ROLE_OPTIONS.includes(label) && m.role !== label) {
+          m.role = label;
+          changed = true;
+        }
+      }
+    });
+
+    if (changed) {
+      saveDb();
+    }
+    return changed;
+  } catch (err) {
+    console.warn("Failed to sync member roles from Supabase profiles:", err);
+    return false;
+  }
+}
+
 // アプリ起動時（またはログイン時）に profiles テーブルから自分の role を取得する
 // 取得した自身のロールが guest だった場合、db.members のメールアドレスと照合して自動でロールを付与する
 async function fetchCurrentUserRole() {
@@ -178,7 +249,7 @@ async function fetchCurrentUserRole() {
       .eq("id", user.id)
       .single();
 
-    const currentRole =
+    let currentRole =
       !profErr && profile && RBAC_ROLES.includes(profile.role)
         ? profile.role
         : "guest";
@@ -194,9 +265,9 @@ async function fetchCurrentUserRole() {
         }
       }
 
-      const loginEmail = state.currentUser.email.trim().toLowerCase();
+      const loginEmail = normalizeEmail(state.currentUser.email);
       const matchedMember = db.members.find(
-        m => m.email && String(m.email).trim().toLowerCase() === loginEmail
+        m => m.email && normalizeEmail(m.email) === loginEmail
       );
 
       if (matchedMember) {
@@ -208,16 +279,17 @@ async function fetchCurrentUserRole() {
           .eq("id", state.currentUser.id);
 
         if (!updateErr) {
-          state.userRole = assignedRole;
-          applyRbacUi(assignedRole);
-          renderFilters();
-          renderView();
-          return assignedRole;
+          currentRole = assignedRole;
         } else {
           console.error("Failed to auto-update user role in profiles:", updateErr);
         }
       }
     }
+
+    state.userRole = currentRole;
+
+    // Supabase上のロール情報（開発管理者など）を名簿カード（db.members）の表示にも反映
+    await syncMemberRolesFromSupabase();
 
     return currentRole;
   } catch (e) {
@@ -229,14 +301,6 @@ async function fetchCurrentUserRole() {
 // ==========================================================
 // 管理者による他メンバーの役職（ロール）変更 → Supabase profiles.role へ自動反映
 // ==========================================================
-
-function rbacRoleToLabel(role) {
-  return RBAC_ROLE_LABELS[role] || role;
-}
-
-function normalizeEmail(email) {
-  return String(email ?? "").trim().toLowerCase();
-}
 
 // 管理者が他メンバーの役職を変更した際に、Supabase の profiles.role を email で特定して更新する非同期関数
 async function updateMemberRole(targetEmail, newRole, options = {}) {
@@ -326,7 +390,7 @@ async function syncRoleToSpreadsheet(email, roleLabel) {
   if (!GAS_ROLE_WEBHOOK_URL) {
     return {
       ok: false,
-      message: "スプレッドシート側の「役職」列は未更新です（同時更新する場合は GAS_ROLE_WEBHOOK_URL を設定してください）。"
+      message: ""
     };
   }
 
@@ -360,7 +424,6 @@ function updateHeaderAuthButtons() {
     authBtn.textContent = state.currentUser ? "🚪 ログアウト" : "🔑 Googleログイン";
   }
 
-  // index.html 側に #btnHeaderAuth がない場合でも動的に追加して確実に表示する
   let headerAuthBtn = document.getElementById("btnHeaderAuth");
   const headerActions = document.querySelector(".header-actions");
   if (!headerAuthBtn && headerActions) {
@@ -1192,6 +1255,7 @@ function mergeMembersFromRows(rows) {
       if (admissionYear) existing.admissionYear = admissionYear;
       if (discordName) existing.discordName = discordName;
       if (subjects.length > 0) existing.subjects = subjects;
+      // スプレッドシート側に明示的な役職が入っている場合のみ反映（この直後にSupabase側のロールで再上書きされる）
       if (roleFromCsv && ROLE_OPTIONS.includes(roleFromCsv)) {
         existing.role = roleFromCsv;
       }
@@ -1330,6 +1394,10 @@ async function syncFromGoogleSheetUrl(rawUrl, silent = false) {
     const rows = await loadGoogleSheetViaJsonp(trimmed);
     const result = mergeMembersFromRows(rows);
     db.sheetSyncUrl = trimmed;
+
+    // スプレッドシート取り込み後に、Supabaseの profiles.role の情報を優先してメンバーカードへ上書き反映
+    await syncMemberRolesFromSupabase();
+
     saveDb();
     renderFilters();
     renderView();
@@ -3727,10 +3795,12 @@ document.addEventListener("DOMContentLoaded", () => {
     reader.onload = ev => {
       try {
         const result = mergeMembersFromCsvText(String(ev.target.result || ""));
-        renderFilters();
-        renderView();
-        alert(`CSV取り込み完了！\n新規追加: ${result.addedCount}名 / 更新: ${result.updatedCount}名`);
-        closeSyncModal();
+        syncMemberRolesFromSupabase().then(() => {
+          renderFilters();
+          renderView();
+          alert(`CSV取り込み完了！\n新規追加: ${result.addedCount}名 / 更新: ${result.updatedCount}名`);
+          closeSyncModal();
+        });
       } catch (err) {
         alert(`CSV取り込みエラー: ${err.message}`);
       }
@@ -3780,7 +3850,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  // 上部プレビューバーおよびスマホ対応ヘッダーのログイン/ログアウトボタン
   const handleAuthButtonClick = () => {
     if (state.currentUser) {
       if (confirm("ログアウトしますか？")) signOutUser();
@@ -3791,7 +3860,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btnGoogleAuth")?.addEventListener("click", handleAuthButtonClick);
   document.getElementById("btnHeaderAuth")?.addEventListener("click", handleAuthButtonClick);
 
-  // OAuthリダイレクト復帰時などのセッション変化も自動検知して画面を更新
   if (supabaseClient) {
     supabaseClient.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
