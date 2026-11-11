@@ -8,8 +8,8 @@ const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwI
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
 // ==========================================================
-const SUPABASE_URL = window.SUPABASE_URL || "https://YOUR_PROJECT_ID.supabase.co";
-const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
+const SUPABASE_URL = window.SUPABASE_URL || "https://taeqrjfoxcdtelvayqcl.supabase.co";
+const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "sb_publishable_icsQtKAeXicVmlgHEn4-Hg_Zbag0Kk2";
 
 const supabaseClient =
   window.supabase &&
