@@ -526,7 +526,7 @@ function applyRbacUi(userRole = state.userRole) {
   }
 }
 
-const ROLE_OPTIONS = ["代表", "副代表", "運営メンバー", "在校生", "OB・OG"];
+const ROLE_OPTIONS = ["代表", "副代表", "運営メンバー", "在校生", "OB・OG", "開発管理者"];
 
 const YEAR_OPTIONS = [
   "2023年度",
