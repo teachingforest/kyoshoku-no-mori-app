@@ -1,13 +1,12 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」+ Supabase RBAC & クラウドDB永久保存対応)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当）」+ Supabase RBAC & クラウドDB永久保存対応)
 
-// 旧バージョンの仮データキャッシュを読み込まないようストレージキーを v5 に更新
 const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
 // GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
-const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbxgZmvJ8dbXt-hFCMYzfuxaxp2OZSyUJQG_jWTwJergMUhPmELv4ID8vH4aN2bthguP/exec";
+const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
 
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
@@ -157,6 +156,20 @@ function normalizeEmail(email) {
   return String(email ?? "").trim().toLowerCase();
 }
 
+// ログイン中のユーザー（state.currentUser.email）に対応する名簿メンバー（db.members）を自動取得する関数
+function getCurrentLoggedInMember() {
+  const myEmail = normalizeEmail(state.currentUser?.email);
+  if (myEmail) {
+    const matched = db.members.find(m => normalizeEmail(m.email) === myEmail);
+    if (matched) return matched;
+  }
+  // 名簿が1名のみ（初期状態）で自分がログインしている場合のフォールバック
+  if (state.currentUser && db.members.length === 1) {
+    return db.members[0];
+  }
+  return null;
+}
+
 // ==========================================================
 // Supabase の profiles テーブルのロール情報を名簿（db.members）のカード表示へ紐づけて同期する関数
 // ==========================================================
@@ -260,7 +273,6 @@ async function loadCloudDb() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
       return true;
     } else {
-      // クラウド側がまだ空の場合は、現在のデータをクラウドへ初期保存
       await saveCloudDb();
       return true;
     }
@@ -714,7 +726,6 @@ function applyRbacUi(userRole = state.userRole) {
   const searchBox = document.querySelector(".search-box");
   const dynamicFilters = document.getElementById("dynamicFilters");
 
-  // タスク・イベント等のデータは基本的に消去せず蓄積するため、一括削除ボタンは誤操作防止のため非表示
   if (btnClearTab) {
     btnClearTab.style.display = "none";
   }
@@ -905,7 +916,6 @@ function inferIsoDateFromLabel(ym, dateLabel) {
   return `${y}-${String(monthNum).padStart(2, "0")}-${String(dayNum).padStart(2, "0")}`;
 }
 
-// 仮データ（サンプルタスク・サンプルイベント・サンプル出欠表）をすべて撤廃して空に設定
 const DEFAULT_DB = {
   sheetSyncUrl: DEFAULT_SHEET_URL,
   lastSyncedAt: "",
@@ -971,7 +981,6 @@ function loadDb() {
   }
 }
 
-// ローカル保存と同時に Supabase の `app_data` テーブルへクラウド永久保存を実行
 function saveDb() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
   saveCloudDb();
@@ -1992,7 +2001,7 @@ function renderAttendanceView() {
   const contentEl = document.getElementById("viewContent");
 
   titleEl.textContent = "月別出欠調整";
-  fabLabel.textContent = "出欠を一括入力・変更";
+  fabLabel.textContent = "自分の出欠を一括入力・変更";
   eventsToggleWrap.style.display = "none";
 
   const monthKeys = Object.keys(db.monthlySchedules).sort();
@@ -2025,6 +2034,8 @@ function renderAttendanceView() {
 
   const dates = sheet.dates || [];
   const responses = sheet.responses || {};
+  const myMember = getCurrentLoggedInMember();
+  const isAdmin = ADMIN_ROLES.includes(state.userRole);
 
   const answeredCount = db.members.filter(m => responses[m.sysId]).length;
   countEl.textContent = `回答 ${answeredCount}/${db.members.length}名`;
@@ -2060,7 +2071,7 @@ function renderAttendanceView() {
     </div>
 
     <div style="margin-bottom: 10px; font-size: 0.82rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 12px; align-items: center;">
-      <span>💡 <strong>使い方:</strong> メンバー名をクリックすると一括変更画面が開きます。表の「◯ / △ / ✕」マスを直接タップして1日ずつ切り替えることも可能です。</span>
+      <span>💡 <strong>使い方:</strong> 右下の「<strong>＋ 自分の出欠を一括入力・変更</strong>」ボタンを押すと、ログイン情報から自動的に自分が割り当てられて一括登録できます。</span>
       ${maxOkCount > 0 ? `<span style="background:#d1fae5; color:#065f46; padding:2px 8px; border-radius:6px; font-weight:700;">★ 緑色の行＝参加可能（◯）が最も多い日程</span>` : ""}
     </div>
 
@@ -2073,14 +2084,23 @@ function renderAttendanceView() {
               <th>◯</th>
               <th>△</th>
               <th>✕</th>
-              ${db.members.map(m => `
-                <th>
-                  <button type="button" class="member-col-btn" data-bulk-member="${escapeHtml(m.sysId)}" title="クリックして${escapeHtml(m.name)}さんの出欠を一括変更">
-                    ${escapeHtml(m.name)}
-                  </button>
-                  <div style="font-size: 0.68rem; color: var(--text-muted); font-weight: 500;">${escapeHtml(m.role)}</div>
-                </th>
-              `).join("")}
+              ${db.members.map(m => {
+                const isMe = myMember && m.sysId === myMember.sysId;
+                return `
+                  <th style="${isMe ? "background: #ecfdf5;" : ""}">
+                    <button
+                      type="button"
+                      class="member-col-btn"
+                      data-bulk-member="${escapeHtml(m.sysId)}"
+                      title="${isMe ? "クリックして自分の出欠を一括変更" : isAdmin ? `クリックして${escapeHtml(m.name)}さんの出欠を一括変更（管理者）` : escapeHtml(m.name)}"
+                      style="${!isMe && !isAdmin ? "text-decoration: none; cursor: default; color: var(--text-main);" : ""}"
+                    >
+                      ${escapeHtml(m.name)}${isMe ? " (自分)" : ""}
+                    </button>
+                    <div style="font-size: 0.68rem; color: var(--text-muted); font-weight: 500;">${escapeHtml(m.role)}</div>
+                  </th>
+                `;
+              }).join("")}
             </tr>
           </thead>
           <tbody>
@@ -2097,12 +2117,15 @@ function renderAttendanceView() {
                   <td><span class="count-pill count-ng">${d.ng}</span></td>
                   ${db.members.map(m => {
                     const mark = responses[m.sysId]?.marks?.[d.dateId] || "-";
+                    const isMe = myMember && m.sysId === myMember.sysId;
+                    const canTapCell = isMe || isAdmin;
                     return `
                       <td
                         class="mark-cell ${getMarkClass(mark)}"
                         data-cell-member="${escapeHtml(m.sysId)}"
                         data-cell-date="${escapeHtml(d.dateId)}"
-                        title="タップして ${escapeHtml(m.name)} さんの ${escapeHtml(d.dateLabel)} の出欠を切替"
+                        style="${!canTapCell ? "cursor: default;" : ""}"
+                        title="${canTapCell ? `タップして ${escapeHtml(m.name)} さんの ${escapeHtml(d.dateLabel)} の出欠を切替` : ""}"
                       >
                         ${escapeHtml(mark)}
                       </td>
@@ -2130,15 +2153,23 @@ function renderAttendanceView() {
     renderAttendanceView();
   });
 
+  // メンバー名クリック：自分自身の列、または管理者のみ一括変更モーダルを開く
   contentEl.querySelectorAll("[data-bulk-member]").forEach(btn => {
     btn.addEventListener("click", () => {
-      openBulkAttendanceModal(btn.dataset.bulkMember);
+      const targetSysId = btn.dataset.bulkMember;
+      const isMe = myMember && targetSysId === myMember.sysId;
+      if (!isMe && !isAdmin) return;
+      openBulkAttendanceModal(targetSysId);
     });
   });
 
+  // セル直接タップ：自分自身の列、または管理者のみ「◯ → △ → ✕」を切り替え可能
   contentEl.querySelectorAll("[data-cell-member]").forEach(cell => {
     cell.addEventListener("click", () => {
       const mId = cell.dataset.cellMember;
+      const isMe = myMember && mId === myMember.sysId;
+      if (!isMe && !isAdmin) return;
+
       const dId = cell.dataset.cellDate;
       if (!sheet.responses[mId]) {
         sheet.responses[mId] = { marks: {}, comment: "" };
@@ -2746,7 +2777,10 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
   modal.classList.add("open");
 }
 
-function openBulkAttendanceModal(defaultMemberSysId = null) {
+// ==========================================================
+// 出欠の一括登録・変更モーダル（ログイン情報から自分を自動割り当て）
+// ==========================================================
+function openBulkAttendanceModal(targetMemberSysId = null) {
   state.modalMode = "bulkAttendance";
   resetFormModalButtons(false);
   const modal = document.getElementById("formModal");
@@ -2755,39 +2789,75 @@ function openBulkAttendanceModal(defaultMemberSysId = null) {
   const btnDelete = document.getElementById("btnDeleteRecord");
 
   const sheet = db.monthlySchedules[state.selectedMonth];
-  if (!sheet) return;
+  if (!sheet) {
+    alert("先に対象月（出欠表）を作成してください。");
+    return;
+  }
 
-  const selectedSysId = defaultMemberSysId || db.members[0]?.sysId;
+  // 1. ログイン中のアカウント（メールアドレス）から自分自身の名簿データを自動検索
+  const myMember = getCurrentLoggedInMember();
+  const isAdmin = ADMIN_ROLES.includes(state.userRole);
+
+  // 管理者が表の名前をクリックした場合はそのメンバー、それ以外（右下のボタン等）は自動的に自分自身を割り当て
+  let assignedMember = null;
+  if (targetMemberSysId && isAdmin) {
+    assignedMember = db.members.find(m => m.sysId === targetMemberSysId) || myMember;
+  } else {
+    assignedMember = myMember || (targetMemberSysId ? db.members.find(m => m.sysId === targetMemberSysId) : null);
+  }
+
+  // 万が一ログイン中のアドレスと一致するメンバーが名簿にまだ存在しない場合
+  if (!assignedMember) {
+    alert(
+      `現在ログイン中のメールアドレス（${state.currentUser?.email || "未ログイン"}）に一致するメンバーが名簿に見つかりません。\n` +
+        "Googleフォームからメンバー登録を行うか、管理者にメールアドレスの登録を依頼してください。"
+    );
+    return;
+  }
+
   btnDelete.style.display = "none";
   titleEl.textContent = `🗓️ ${sheet.monthLabel} 出欠の一括登録・変更`;
 
   function renderBulkFormForMember(memberSysId) {
-    const existing = sheet.responses[memberSysId] || { marks: {}, comment: "" };
-    const isAlreadyAnswered = Boolean(sheet.responses[memberSysId]);
+    const memberObj = db.members.find(m => m.sysId === memberSysId) || assignedMember;
+    const existing = sheet.responses[memberObj.sysId] || { marks: {}, comment: "" };
+    const isAlreadyAnswered = Boolean(sheet.responses[memberObj.sysId]);
+    const isSelf = myMember && memberObj.sysId === myMember.sysId;
 
     bodyEl.innerHTML = `
       <div class="form-group">
-        <label class="form-label" for="bulkMemberSelect">
-          1. あなたの名前を選択 <span class="ro-tag">名簿連動・表記ゆれ防止</span>
+        <label class="form-label">
+          👤 出欠を登録するメンバー <span class="ro-tag" style="background: #dcfce7; color: #166534;">ログイン情報から自動割当</span>
         </label>
-        <select id="bulkMemberSelect" class="form-control" style="font-weight: 700;">
-          ${db.members.map(m => `
-            <option value="${escapeHtml(m.sysId)}" ${m.sysId === memberSysId ? "selected" : ""}>
-              ${escapeHtml(m.name)}（${escapeHtml(m.studentId || "")} / ${escapeHtml(m.role)}）
-              ${sheet.responses[m.sysId] ? "✓回答済・変更可" : "未回答"}
-            </option>
-          `).join("")}
-        </select>
+        <input type="hidden" id="bulkMemberSelect" value="${escapeHtml(memberObj.sysId)}" />
+        <div class="detail-item" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #f0fdf4; border-color: #bbf7d0; padding: 12px 14px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div class="avatar" style="width: 38px; height: 38px; font-size: 0.95rem; background: #fff;">
+              ${escapeHtml(memberObj.name.slice(0, 1))}
+            </div>
+            <div>
+              <div style="font-size: 1rem; font-weight: 800; color: var(--primary-dark);">
+                ${escapeHtml(memberObj.name)} ${isSelf ? `<span style="font-size: 0.78rem; color: #15803d;">（あなた）</span>` : ""}
+              </div>
+              <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 2px;">
+                ${escapeHtml(memberObj.studentId ? `学籍番号: ${memberObj.studentId} / ` : "")}${escapeHtml(memberObj.role)}
+              </div>
+            </div>
+          </div>
+          <span class="badge ${isAlreadyAnswered ? "event-status-active" : "status-not-started"}">
+            ${isAlreadyAnswered ? "✓ 回答済・変更可" : "✨ 未回答（新規）"}
+          </span>
+        </div>
         <span class="form-hint" style="color: ${isAlreadyAnswered ? "var(--primary)" : "var(--text-muted)"}; font-weight: 600;">
           ${isAlreadyAnswered
             ? "🔄 登録済みの出欠データを読み込みました。変更したい日程をタップして上書き保存できます。"
-            : "✨ 新規登録です。各日程の「◯ / △ / ✕」を選択して保存してください。"}
+            : "✨ 各日程の「◯ / △ / ✕」を選択して保存してください。"}
         </span>
       </div>
 
       <div class="form-group">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
-          <label class="form-label">2. ${escapeHtml(sheet.monthLabel)}の全日程を一括選択</label>
+          <label class="form-label">1. ${escapeHtml(sheet.monthLabel)}の全日程を一括選択</label>
           <div style="display: flex; gap: 4px;">
             <button type="button" class="btn-icon" data-fill-all="◯" style="font-size: 0.75rem; padding: 4px 8px;">すべて◯</button>
             <button type="button" class="btn-icon" data-fill-all="△" style="font-size: 0.75rem; padding: 4px 8px;">すべて△</button>
@@ -2822,21 +2892,17 @@ function openBulkAttendanceModal(defaultMemberSysId = null) {
 
       <div class="form-group">
         <label class="form-label" for="bulkComment">
-          3. ひとことコメント（遅刻・早退の連絡など）
+          2. ひとことコメント（遅刻・早退の連絡など）
         </label>
         <input
           type="text"
           id="bulkComment"
           class="form-control"
           value="${escapeHtml(existing.comment || "")}"
-          placeholder="例: 11/11は授業のため17:00から参加します"
+          placeholder="例: 授業のため18:00頃から参加します"
         />
       </div>
     `;
-
-    document.getElementById("bulkMemberSelect").addEventListener("change", e => {
-      renderBulkFormForMember(e.target.value);
-    });
 
     bodyEl.querySelectorAll(".mark-radio-btn").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -2857,7 +2923,7 @@ function openBulkAttendanceModal(defaultMemberSysId = null) {
     });
   }
 
-  renderBulkFormForMember(selectedSysId);
+  renderBulkFormForMember(assignedMember.sysId);
   modal.classList.add("open");
 }
 
@@ -3842,7 +3908,6 @@ document.addEventListener("DOMContentLoaded", () => {
     reader.readAsText(file, "UTF-8");
   });
 
-  // 画面に戻ってきた際、Supabaseから最新データを再取得して他メンバーの更新も同期
   window.addEventListener("focus", async () => {
     if (state.currentUser && state.userRole !== "guest") {
       await loadCloudDb();
