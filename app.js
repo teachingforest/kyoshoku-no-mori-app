@@ -1,12 +1,12 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当・未回答通知バッジ）」+ Supabase RBAC & クラウドDB永久保存対応)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当・未回答通知バッジ）」+ スワイプタブ切替 + Supabase RBAC & クラウドDB永久保存対応)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
 // GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
-const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbxgZmvJ8dbXt-hFCMYzfuxaxp2OZSyUJQG_jWTwJergMUhPmELv4ID8vH4aN2bthguP/exec";
+const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
 
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
@@ -173,24 +173,20 @@ function getCurrentLoggedInMember() {
 // 未回答の月を判定し、「出欠調整」タブの右上に通知バッジを表示するロジック
 // ==========================================================
 
-// 指定メンバーが対象月（sheet）のすべての候補日に回答済みかどうかを判定
 function isMonthAnsweredByMember(sheet, memberSysId) {
   if (!sheet || !Array.isArray(sheet.dates) || sheet.dates.length === 0) {
-    // 候補日が1件もない月は未回答扱いにしない
     return true;
   }
   if (!memberSysId) return true;
   const resp = sheet.responses?.[memberSysId];
   if (!resp || !resp.marks) return false;
 
-  // その月の全候補日に対して「◯ / △ / ✕」のいずれかが入力されていれば回答済み
   return sheet.dates.every(d => {
     const mk = resp.marks[d.dateId];
     return MARK_OPTIONS.includes(mk);
   });
 }
 
-// 現在ログイン中のメンバーにとって「未回答」となっている月キー（YYYY-MM）の配列を取得
 function getUnansweredMonthsForCurrentUser() {
   if (!hasPermission(state.userRole, "attendanceInput")) return [];
   const myMember = getCurrentLoggedInMember();
@@ -203,7 +199,6 @@ function getUnansweredMonthsForCurrentUser() {
   });
 }
 
-// 下部ナビゲーションの「出欠調整」タブ右上に未回答通知バッジを描画・更新
 function updateAttendanceNotificationBadge() {
   const navBtn = document.querySelector('.bottom-nav .nav-item[data-view="attendance"]');
   if (!navBtn) return;
@@ -245,6 +240,114 @@ function updateAttendanceNotificationBadge() {
   badgeEl.textContent = count > 9 ? "9+" : String(count);
   badgeEl.title = `未回答の出欠表が ${count}ヶ月分 あります`;
   badgeEl.style.display = "inline-block";
+}
+
+// ==========================================================
+// スマホ画面の左右スワイプ操作でタブを移動する機能
+// ==========================================================
+function switchViewWithDirection(targetView, direction = null) {
+  if (!targetView || targetView === state.currentView) return;
+  state.currentView = targetView;
+  state.searchQuery = "";
+  const searchInput = document.getElementById("searchInput");
+  if (searchInput) searchInput.value = "";
+
+  renderFilters();
+  renderView();
+
+  // スワイプ方向に応じたスライドアニメーション適用と先頭スクロール
+  const contentEl = document.getElementById("viewContent");
+  if (contentEl && direction) {
+    contentEl.classList.remove("swipe-in-right", "swipe-in-left");
+    void contentEl.offsetWidth; // reflow
+    contentEl.classList.add(direction === "next" ? "swipe-in-right" : "swipe-in-left");
+  }
+
+  const phoneViewport = document.querySelector(".phone-viewport");
+  if (phoneViewport) phoneViewport.scrollTop = 0;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function initSwipeTabNavigation() {
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTime = 0;
+  let ignoreSwipe = false;
+
+  document.addEventListener(
+    "touchstart",
+    e => {
+      if (!e.touches || e.touches.length !== 1) {
+        ignoreSwipe = true;
+        return;
+      }
+
+      // モーダルが開いている最中や入力要素上のタッチはスワイプタブ移動の対象外
+      if (document.querySelector(".modal-backdrop.open")) {
+        ignoreSwipe = true;
+        return;
+      }
+
+      const targetEl = e.target;
+      if (targetEl && targetEl.closest("input, textarea, select")) {
+        ignoreSwipe = true;
+        return;
+      }
+
+      // 出欠表やDB表などの横スクロール可能なエリア上では、表の横スクロールを優先
+      const hScrollable = targetEl?.closest(".matrix-scroll, .db-table-wrap");
+      if (hScrollable && hScrollable.scrollWidth > hScrollable.clientWidth) {
+        ignoreSwipe = true;
+        return;
+      }
+
+      ignoreSwipe = false;
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchStartTime = Date.now();
+    },
+    { passive: true }
+  );
+
+  document.addEventListener(
+    "touchend",
+    e => {
+      if (ignoreSwipe || !e.changedTouches || e.changedTouches.length !== 1) return;
+
+      const deltaX = e.changedTouches[0].clientX - touchStartX;
+      const deltaY = e.changedTouches[0].clientY - touchStartY;
+      const elapsed = Date.now() - touchStartTime;
+
+      // 800ms以内、横移動55px以上、かつ縦スクロールよりも明確に横方向（1.4倍以上）のスワイプのみ判定
+      if (
+        elapsed > 800 ||
+        Math.abs(deltaX) < 55 ||
+        Math.abs(deltaX) < Math.abs(deltaY) * 1.4
+      ) {
+        return;
+      }
+
+      // 現在表示中（閲覧権限のある）タブ一覧を取得
+      const visibleViews = Array.from(document.querySelectorAll(".bottom-nav .nav-item"))
+        .filter(btn => btn.style.display !== "none")
+        .map(btn => btn.dataset.view)
+        .filter(Boolean);
+
+      if (visibleViews.length <= 1) return;
+
+      const currentIdx = visibleViews.indexOf(state.currentView);
+      if (currentIdx === -1) return;
+
+      if (deltaX < 0 && currentIdx < visibleViews.length - 1) {
+        // 左へスワイプ（指を右→左へ）: 次のタブへ移動
+        switchViewWithDirection(visibleViews[currentIdx + 1], "next");
+      } else if (deltaX > 0 && currentIdx > 0) {
+        // 右へスワイプ（指を左→右へ）: 前のタブへ移動
+        switchViewWithDirection(visibleViews[currentIdx - 1], "prev");
+      }
+    },
+    { passive: true }
+  );
 }
 
 // ==========================================================
@@ -2091,7 +2194,6 @@ function renderAttendanceView() {
   const unansweredMonths = getUnansweredMonthsForCurrentUser();
 
   if (!db.monthlySchedules[state.selectedMonth] && monthKeys.length > 0) {
-    // 選択中の月が存在しない場合、未回答の月があれば優先してその月を開く
     state.selectedMonth = unansweredMonths[0] || monthKeys[0];
   }
   const sheet = db.monthlySchedules[state.selectedMonth];
@@ -2123,7 +2225,6 @@ function renderAttendanceView() {
   const myMember = getCurrentLoggedInMember();
   const isAdmin = ADMIN_ROLES.includes(state.userRole);
 
-  // 全日程に入力済みのメンバー数カウント
   const answeredCount = db.members.filter(m => isMonthAnsweredByMember(sheet, m.sysId)).length;
   countEl.textContent = `回答 ${answeredCount}/${db.members.length}名`;
 
@@ -2140,7 +2241,6 @@ function renderAttendanceView() {
     return { ...d, ok, maybe, ng };
   });
 
-  // 未回答の月がある場合の案内バナー
   const unansweredBannerHtml =
     unansweredMonths.length > 0
       ? `
@@ -2268,7 +2368,6 @@ function renderAttendanceView() {
     renderAttendanceView();
   });
 
-  // 未回答バナー内の月ボタンクリックでその月へ即座に切り替え
   contentEl.querySelectorAll("[data-jump-unanswered]").forEach(btn => {
     btn.addEventListener("click", () => {
       state.selectedMonth = btn.dataset.jumpUnanswered;
@@ -2276,12 +2375,10 @@ function renderAttendanceView() {
     });
   });
 
-  // 未回答バナー内の「この月の出欠を今すぐ回答」ボタン
   document.getElementById("btnBannerAnswerNow")?.addEventListener("click", () => {
     openBulkAttendanceModal(null);
   });
 
-  // メンバー名クリック：自分自身の列、または管理者のみ一括変更モーダルを開く
   contentEl.querySelectorAll("[data-bulk-member]").forEach(btn => {
     btn.addEventListener("click", () => {
       const targetSysId = btn.dataset.bulkMember;
@@ -2291,7 +2388,6 @@ function renderAttendanceView() {
     });
   });
 
-  // セル直接タップ：自分自身の列、または管理者のみ「◯ → △ → ✕」を切り替え可能
   contentEl.querySelectorAll("[data-cell-member]").forEach(cell => {
     cell.addEventListener("click", () => {
       const mId = cell.dataset.cellMember;
@@ -3686,6 +3782,9 @@ function closeSyncModal() {
 
 // 初期化処理
 document.addEventListener("DOMContentLoaded", () => {
+  // スマホ画面用の左右スワイプタブ切替を初期化
+  initSwipeTabNavigation();
+
   document.querySelectorAll(".preview-mode-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const isMobile = btn.dataset.device === "mobile";
