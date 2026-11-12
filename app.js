@@ -1,12 +1,12 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当）」+ Supabase RBAC & クラウドDB永久保存対応)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当・未回答通知バッジ）」+ Supabase RBAC & クラウドDB永久保存対応)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
 // GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
-const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
+const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbxgZmvJ8dbXt-hFCMYzfuxaxp2OZSyUJQG_jWTwJergMUhPmELv4ID8vH4aN2bthguP/exec";
 
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
@@ -163,11 +163,88 @@ function getCurrentLoggedInMember() {
     const matched = db.members.find(m => normalizeEmail(m.email) === myEmail);
     if (matched) return matched;
   }
-  // 名簿が1名のみ（初期状態）で自分がログインしている場合のフォールバック
   if (state.currentUser && db.members.length === 1) {
     return db.members[0];
   }
   return null;
+}
+
+// ==========================================================
+// 未回答の月を判定し、「出欠調整」タブの右上に通知バッジを表示するロジック
+// ==========================================================
+
+// 指定メンバーが対象月（sheet）のすべての候補日に回答済みかどうかを判定
+function isMonthAnsweredByMember(sheet, memberSysId) {
+  if (!sheet || !Array.isArray(sheet.dates) || sheet.dates.length === 0) {
+    // 候補日が1件もない月は未回答扱いにしない
+    return true;
+  }
+  if (!memberSysId) return true;
+  const resp = sheet.responses?.[memberSysId];
+  if (!resp || !resp.marks) return false;
+
+  // その月の全候補日に対して「◯ / △ / ✕」のいずれかが入力されていれば回答済み
+  return sheet.dates.every(d => {
+    const mk = resp.marks[d.dateId];
+    return MARK_OPTIONS.includes(mk);
+  });
+}
+
+// 現在ログイン中のメンバーにとって「未回答」となっている月キー（YYYY-MM）の配列を取得
+function getUnansweredMonthsForCurrentUser() {
+  if (!hasPermission(state.userRole, "attendanceInput")) return [];
+  const myMember = getCurrentLoggedInMember();
+  if (!myMember) return [];
+
+  const monthKeys = Object.keys(db.monthlySchedules || {}).sort();
+  return monthKeys.filter(ym => {
+    const sheet = db.monthlySchedules[ym];
+    return !isMonthAnsweredByMember(sheet, myMember.sysId);
+  });
+}
+
+// 下部ナビゲーションの「出欠調整」タブ右上に未回答通知バッジを描画・更新
+function updateAttendanceNotificationBadge() {
+  const navBtn = document.querySelector('.bottom-nav .nav-item[data-view="attendance"]');
+  if (!navBtn) return;
+
+  let badgeEl = document.getElementById("attendanceNavBadge");
+  const unansweredMonths = getUnansweredMonthsForCurrentUser();
+  const count = unansweredMonths.length;
+
+  if (count === 0) {
+    if (badgeEl) badgeEl.style.display = "none";
+    return;
+  }
+
+  if (!badgeEl) {
+    badgeEl = document.createElement("span");
+    badgeEl.id = "attendanceNavBadge";
+    badgeEl.style.cssText = [
+      "position: absolute",
+      "top: 4px",
+      "right: calc(50% - 26px)",
+      "min-width: 18px",
+      "height: 18px",
+      "padding: 0 5px",
+      "border-radius: 999px",
+      "background: #dc2626",
+      "color: #ffffff",
+      "font-size: 0.68rem",
+      "font-weight: 800",
+      "line-height: 18px",
+      "text-align: center",
+      "box-shadow: 0 1px 4px rgba(220, 38, 38, 0.45)",
+      "border: 1.5px solid #ffffff",
+      "pointer-events: none",
+      "z-index: 5"
+    ].join(";");
+    navBtn.appendChild(badgeEl);
+  }
+
+  badgeEl.textContent = count > 9 ? "9+" : String(count);
+  badgeEl.title = `未回答の出欠表が ${count}ヶ月分 あります`;
+  badgeEl.style.display = "inline-block";
 }
 
 // ==========================================================
@@ -542,6 +619,7 @@ function applyRbacUi(userRole = state.userRole) {
   }
 
   updateHeaderAuthButtons();
+  updateAttendanceNotificationBadge();
 
   const tabAccess = {
     members: hasPermission(validRole, "membersTabView"),
@@ -983,6 +1061,7 @@ function loadDb() {
 
 function saveDb() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  updateAttendanceNotificationBadge();
   saveCloudDb();
 }
 
@@ -1664,6 +1743,8 @@ function renderView() {
     btn.classList.toggle("active", btn.dataset.view === state.currentView);
   });
 
+  updateAttendanceNotificationBadge();
+
   if (btnClearTab) {
     btnClearTab.style.display = "none";
   }
@@ -2004,9 +2085,14 @@ function renderAttendanceView() {
   fabLabel.textContent = "自分の出欠を一括入力・変更";
   eventsToggleWrap.style.display = "none";
 
+  updateAttendanceNotificationBadge();
+
   const monthKeys = Object.keys(db.monthlySchedules).sort();
+  const unansweredMonths = getUnansweredMonthsForCurrentUser();
+
   if (!db.monthlySchedules[state.selectedMonth] && monthKeys.length > 0) {
-    state.selectedMonth = monthKeys[0];
+    // 選択中の月が存在しない場合、未回答の月があれば優先してその月を開く
+    state.selectedMonth = unansweredMonths[0] || monthKeys[0];
   }
   const sheet = db.monthlySchedules[state.selectedMonth];
 
@@ -2037,7 +2123,8 @@ function renderAttendanceView() {
   const myMember = getCurrentLoggedInMember();
   const isAdmin = ADMIN_ROLES.includes(state.userRole);
 
-  const answeredCount = db.members.filter(m => responses[m.sysId]).length;
+  // 全日程に入力済みのメンバー数カウント
+  const answeredCount = db.members.filter(m => isMonthAnsweredByMember(sheet, m.sysId)).length;
   countEl.textContent = `回答 ${answeredCount}/${db.members.length}名`;
 
   let maxOkCount = 0;
@@ -2053,14 +2140,42 @@ function renderAttendanceView() {
     return { ...d, ok, maybe, ng };
   });
 
+  // 未回答の月がある場合の案内バナー
+  const unansweredBannerHtml =
+    unansweredMonths.length > 0
+      ? `
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.83rem; color: #991b1b;">
+          <div>
+            <strong>🔴 未回答の出欠表があります（${unansweredMonths.length}件）:</strong>
+            ${unansweredMonths
+              .map(ym => {
+                const lb = db.monthlySchedules[ym]?.monthLabel || ym;
+                return `<button type="button" data-jump-unanswered="${escapeHtml(ym)}" style="background: ${ym === state.selectedMonth ? "#dc2626" : "#fff"}; color: ${ym === state.selectedMonth ? "#fff" : "#dc2626"}; border: 1px solid #fca5a5; border-radius: 999px; padding: 2px 10px; font-size: 0.78rem; font-weight: 700; margin-left: 4px; cursor: pointer;">${escapeHtml(lb)}</button>`;
+              })
+              .join("")}
+          </div>
+          ${unansweredMonths.includes(state.selectedMonth)
+            ? `<button type="button" class="btn btn-primary" id="btnBannerAnswerNow" style="background: #dc2626; padding: 5px 12px; font-size: 0.78rem;">✍️ この月の出欠を今すぐ回答</button>`
+            : ""
+          }
+        </div>
+      `
+      : "";
+
   contentEl.innerHTML = `
+    ${unansweredBannerHtml}
+
     <div class="attendance-top-bar">
       <div class="month-selector-group">
         <label for="monthSelect" style="font-weight: 700; font-size: 0.9rem;">📅 対象月:</label>
         <select id="monthSelect" class="month-select">
           ${monthKeys.map(k => {
             const mSheet = db.monthlySchedules[k];
-            return `<option value="${escapeHtml(k)}" ${k === state.selectedMonth ? "selected" : ""}>${escapeHtml(mSheet.monthLabel)}（${mSheet.dates.length}日程）</option>`;
+            const isUnanswered = unansweredMonths.includes(k);
+            const statusSuffix = myMember && mSheet.dates.length > 0
+              ? (isUnanswered ? " 🔴未回答" : " ✓回答済")
+              : "";
+            return `<option value="${escapeHtml(k)}" ${k === state.selectedMonth ? "selected" : ""}>${escapeHtml(mSheet.monthLabel)}（${mSheet.dates.length}日程）${statusSuffix}</option>`;
           }).join("")}
         </select>
         <button type="button" class="btn-icon" id="btnAddMonthQuick" style="font-weight: 700; color: var(--primary-dark); border-color: var(--primary);">
@@ -2151,6 +2266,19 @@ function renderAttendanceView() {
   document.getElementById("monthSelect").addEventListener("change", e => {
     state.selectedMonth = e.target.value;
     renderAttendanceView();
+  });
+
+  // 未回答バナー内の月ボタンクリックでその月へ即座に切り替え
+  contentEl.querySelectorAll("[data-jump-unanswered]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.selectedMonth = btn.dataset.jumpUnanswered;
+      renderAttendanceView();
+    });
+  });
+
+  // 未回答バナー内の「この月の出欠を今すぐ回答」ボタン
+  document.getElementById("btnBannerAnswerNow")?.addEventListener("click", () => {
+    openBulkAttendanceModal(null);
   });
 
   // メンバー名クリック：自分自身の列、または管理者のみ一括変更モーダルを開く
@@ -2794,11 +2922,9 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
     return;
   }
 
-  // 1. ログイン中のアカウント（メールアドレス）から自分自身の名簿データを自動検索
   const myMember = getCurrentLoggedInMember();
   const isAdmin = ADMIN_ROLES.includes(state.userRole);
 
-  // 管理者が表の名前をクリックした場合はそのメンバー、それ以外（右下のボタン等）は自動的に自分自身を割り当て
   let assignedMember = null;
   if (targetMemberSysId && isAdmin) {
     assignedMember = db.members.find(m => m.sysId === targetMemberSysId) || myMember;
@@ -2806,7 +2932,6 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
     assignedMember = myMember || (targetMemberSysId ? db.members.find(m => m.sysId === targetMemberSysId) : null);
   }
 
-  // 万が一ログイン中のアドレスと一致するメンバーが名簿にまだ存在しない場合
   if (!assignedMember) {
     alert(
       `現在ログイン中のメールアドレス（${state.currentUser?.email || "未ログイン"}）に一致するメンバーが名簿に見つかりません。\n` +
@@ -2821,7 +2946,7 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
   function renderBulkFormForMember(memberSysId) {
     const memberObj = db.members.find(m => m.sysId === memberSysId) || assignedMember;
     const existing = sheet.responses[memberObj.sysId] || { marks: {}, comment: "" };
-    const isAlreadyAnswered = Boolean(sheet.responses[memberObj.sysId]);
+    const isAlreadyAnswered = isMonthAnsweredByMember(sheet, memberObj.sysId);
     const isSelf = myMember && memberObj.sysId === myMember.sysId;
 
     bodyEl.innerHTML = `
@@ -2845,7 +2970,7 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
             </div>
           </div>
           <span class="badge ${isAlreadyAnswered ? "event-status-active" : "status-not-started"}">
-            ${isAlreadyAnswered ? "✓ 回答済・変更可" : "✨ 未回答（新規）"}
+            ${isAlreadyAnswered ? "✓ 回答済・変更可" : "🔴 未回答（新規）"}
           </span>
         </div>
         <span class="form-hint" style="color: ${isAlreadyAnswered ? "var(--primary)" : "var(--text-muted)"}; font-weight: 600;">
