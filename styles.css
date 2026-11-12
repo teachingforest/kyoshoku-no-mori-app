@@ -29,14 +29,22 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  padding-bottom: 76px;
+  padding-bottom: 140px;
+}
+
+/* Netlifyが自動挿入するバッジがDOM内にある場合は非表示化 */
+a[href*="netlify.com"][target="_blank"]:not(.btn),
+iframe[src*="netlify"],
+div[class*="netlify-badge"],
+#netlify-badge {
+  display: none !important;
 }
 
 /* Header */
 .app-header {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: 35;
   background: var(--primary-dark);
   color: #fff;
   padding: 12px 20px;
@@ -44,6 +52,7 @@ body {
   align-items: center;
   justify-content: space-between;
   box-shadow: var(--shadow-sm);
+  order: 2;
 }
 
 .brand {
@@ -95,6 +104,64 @@ body {
 
 .btn-header:hover {
   background: rgba(255, 255, 255, 0.24);
+}
+
+/* Navigation Bar（スマホ下部のNetlifyバッジやブラウザバーと重ならないようヘッダー直下に配置） */
+.bottom-nav {
+  position: sticky;
+  top: 58px;
+  left: 0;
+  right: 0;
+  height: 58px;
+  background: var(--surface);
+  border-bottom: 2px solid var(--border);
+  display: flex;
+  justify-content: center;
+  z-index: 30;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  order: 3;
+}
+
+.bottom-nav-inner {
+  width: 100%;
+  max-width: 900px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.nav-item {
+  border: none;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 700;
+  position: relative;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.nav-item .nav-icon {
+  font-size: 1.18rem;
+}
+
+.nav-item.active {
+  color: var(--primary-dark);
+  background: var(--primary-pale);
+}
+
+.nav-item.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 56px;
+  height: 3px;
+  background: var(--primary);
+  border-radius: 4px 4px 0 0;
 }
 
 /* Main Container */
@@ -361,7 +428,7 @@ body {
   word-break: break-word;
 }
 
-/* Task parallel row (タスクID・進捗・タスク名 並列＆大きめフォント) */
+/* Task parallel row */
 .task-parallel-row {
   display: flex;
   align-items: center;
@@ -620,18 +687,18 @@ body {
   background: #d1fae5;
 }
 
-/* Floating Action Button (AppSheet style) */
+/* Floating Action Button（右下のNetlifyバッジ・ブラウザバーを避けて配置） */
 .fab {
   position: fixed;
-  right: 22px;
-  bottom: 84px;
+  right: 16px;
+  bottom: 108px;
   z-index: 25;
   background: var(--primary);
   color: #fff;
   border: none;
   border-radius: 999px;
-  padding: 13px 20px;
-  font-size: 0.95rem;
+  padding: 12px 18px;
+  font-size: 0.9rem;
   font-weight: 700;
   box-shadow: var(--shadow-lg);
   cursor: pointer;
@@ -644,62 +711,6 @@ body {
 .fab:hover {
   background: var(--primary-dark);
   transform: translateY(-2px);
-}
-
-/* Bottom Navigation Bar (AppSheet Primary Views) */
-.bottom-nav {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 64px;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  display: flex;
-  justify-content: center;
-  z-index: 30;
-  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.04);
-}
-
-.bottom-nav-inner {
-  width: 100%;
-  max-width: 680px;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-}
-
-.nav-item {
-  border: none;
-  background: transparent;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 0.76rem;
-  font-weight: 600;
-  position: relative;
-  transition: color 0.15s;
-}
-
-.nav-item .nav-icon {
-  font-size: 1.25rem;
-}
-
-.nav-item.active {
-  color: var(--primary);
-}
-
-.nav-item.active::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  width: 48px;
-  height: 3px;
-  background: var(--primary);
-  border-radius: 0 0 4px 4px;
 }
 
 /* Modal */
@@ -1240,6 +1251,7 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
+  order: 4;
 }
 
 /* When Smartphone Preview Mode is active on PC */
@@ -1281,6 +1293,7 @@ body {
     font-size: 0.74rem;
     font-weight: 700;
     flex-shrink: 0;
+    order: 1;
   }
 
   body.mobile-preview-mode .phone-notch {
@@ -1293,6 +1306,15 @@ body {
   body.mobile-preview-mode .app-header {
     padding: 10px 14px;
     position: relative;
+    order: 2;
+  }
+
+  body.mobile-preview-mode .bottom-nav {
+    position: relative;
+    top: 0;
+    height: 54px;
+    flex-shrink: 0;
+    order: 3;
   }
 
   body.mobile-preview-mode .brand-title {
@@ -1316,8 +1338,9 @@ body {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-bottom: 76px;
+    padding-bottom: 90px;
     scrollbar-width: thin;
+    order: 4;
   }
 
   body.mobile-preview-mode .app-container {
@@ -1374,17 +1397,9 @@ body {
   body.mobile-preview-mode .fab {
     position: absolute;
     right: 14px;
-    bottom: 78px;
+    bottom: 24px;
     padding: 11px 16px;
     font-size: 0.84rem;
-  }
-
-  body.mobile-preview-mode .bottom-nav {
-    position: absolute;
-    bottom: 14px;
-    left: 0;
-    right: 0;
-    height: 58px;
   }
 
   body.mobile-preview-mode .phone-home-bar {
@@ -1436,6 +1451,10 @@ body {
   .app-header {
     padding: 10px 14px;
   }
+  .bottom-nav {
+    top: 54px;
+    height: 54px;
+  }
   .brand-title {
     font-size: 0.95rem;
   }
@@ -1463,5 +1482,12 @@ body {
   .matrix-table th.col-date-label,
   .matrix-table td.col-date-label {
     min-width: 130px;
+  }
+  /* スマホ実機では右下のNetlifyバッジとブラウザバーを避けた高さにFABを固定 */
+  .fab {
+    right: 14px;
+    bottom: 112px;
+    padding: 11px 16px;
+    font-size: 0.84rem;
   }
 }
