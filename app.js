@@ -1,13 +1,12 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」+ Supabase RBAC自動連携 + スマホ対応ログイン画面)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更」+ Supabase RBAC & クラウドDB永久保存対応)
 
-const STORAGE_KEY = "kyoshoku_no_mori_db_v4";
+// 旧バージョンの仮データキャッシュを読み込まないようストレージキーを v5 に更新
+const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
 // GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
-// デプロイ後に発行される「https://script.google.com/macros/s/xxxx/exec」を設定してください。
-// 空文字のままの場合、スプレッドシート側の更新はスキップされます（Supabaseの権限更新は行われます）。
 const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbxgZmvJ8dbXt-hFCMYzfuxaxp2OZSyUJQG_jWTwJergMUhPmELv4ID8vH4aN2bthguP/exec";
 
 // ==========================================================
@@ -86,7 +85,6 @@ function hasPermission(userRole, permissionKey) {
   return allowed.includes(normalizedRole);
 }
 
-// 特定の役職への変更権限があるか判定（Supabase側の public.can_assign_role() と同一ロジック）
 function canAssignMemberRole(userRole, targetRole) {
   const target = RBAC_ROLES.includes(targetRole) ? targetRole : mapMemberRoleToRbacRole(targetRole);
   switch (target) {
@@ -132,7 +130,6 @@ async function signOutUser() {
   applyRbacUi(state.userRole);
 }
 
-// 名簿データ（db.members）の役職表記を Supabase profiles.role の内部ロール値に変換する
 function mapMemberRoleToRbacRole(memberRole) {
   const normalized = String(memberRole ?? "").trim();
   const roleMap = {
@@ -185,8 +182,6 @@ async function syncMemberRolesFromSupabase() {
     const myEmail = normalizeEmail(state.currentUser.email);
     const myRole = state.userRole;
 
-    // ログイン中の自分自身のメールアドレスがまだどのメンバーカードにも設定されていない場合、
-    // 初期カード（学籍番号 2301196）またはメールアドレス未設定の自分のカードに自動で紐づける
     if (myEmail && !db.members.some(m => normalizeEmail(m.email) === myEmail)) {
       const selfCandidate =
         db.members.find(m => m.studentId === "2301196" && !normalizeEmail(m.email)) ||
@@ -198,7 +193,6 @@ async function syncMemberRolesFromSupabase() {
       }
     }
 
-    // 各メンバーのメールアドレスと Supabase の profiles.email を照合し、役職ラベルを最新化
     db.members.forEach(m => {
       const memEmail = normalizeEmail(m.email);
       if (!memEmail) return;
@@ -223,8 +217,92 @@ async function syncMemberRolesFromSupabase() {
   }
 }
 
+// ==========================================================
+// Supabase `app_data` テーブルとのクラウド同期（タスク・イベント・出欠データの永久保存）
+// ==========================================================
+async function loadCloudDb() {
+  if (!supabaseClient || !state.currentUser || state.userRole === "guest") return false;
+
+  try {
+    const { data: row, error } = await supabaseClient
+      .from("app_data")
+      .select("data, updated_at")
+      .eq("id", "main")
+      .maybeSingle();
+
+    if (error) {
+      console.warn("Supabase app_data 読み込みスキップ（SQL未実行またはRLS制限）:", error.message);
+      return false;
+    }
+
+    if (row && row.data && typeof row.data === "object" && Object.keys(row.data).length > 0) {
+      const cloud = row.data;
+      if (Array.isArray(cloud.members) && cloud.members.length > 0) {
+        db.members = cloud.members;
+      }
+      if (Array.isArray(cloud.tasks)) {
+        db.tasks = cloud.tasks;
+      }
+      if (Array.isArray(cloud.events)) {
+        db.events = cloud.events;
+      }
+      if (cloud.monthlySchedules && typeof cloud.monthlySchedules === "object") {
+        db.monthlySchedules = cloud.monthlySchedules;
+      }
+      if (cloud.sheetSyncUrl) {
+        db.sheetSyncUrl = cloud.sheetSyncUrl;
+      }
+      if (cloud.lastSyncedAt) {
+        db.lastSyncedAt = cloud.lastSyncedAt;
+      }
+
+      reconcileEventsAndSchedules(db);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      return true;
+    } else {
+      // クラウド側がまだ空の場合は、現在のデータをクラウドへ初期保存
+      await saveCloudDb();
+      return true;
+    }
+  } catch (err) {
+    console.warn("Failed to load cloud DB:", err);
+    return false;
+  }
+}
+
+async function saveCloudDb() {
+  if (!supabaseClient || !state.currentUser || state.userRole === "guest") return false;
+
+  try {
+    const payload = {
+      id: "main",
+      data: {
+        sheetSyncUrl: db.sheetSyncUrl || DEFAULT_SHEET_URL,
+        lastSyncedAt: db.lastSyncedAt || "",
+        members: db.members || [],
+        tasks: db.tasks || [],
+        events: db.events || [],
+        monthlySchedules: db.monthlySchedules || {}
+      },
+      updated_by: state.currentUser.id
+    };
+
+    const { error } = await supabaseClient
+      .from("app_data")
+      .upsert(payload, { onConflict: "id" });
+
+    if (error) {
+      console.warn("Supabase app_data 保存エラー:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("Failed to save cloud DB:", err);
+    return false;
+  }
+}
+
 // アプリ起動時（またはログイン時）に profiles テーブルから自分の role を取得する
-// 取得した自身のロールが guest だった場合、db.members のメールアドレスと照合して自動でロールを付与する
 async function fetchCurrentUserRole() {
   if (!supabaseClient) {
     return state.userRole || "developer";
@@ -254,7 +332,6 @@ async function fetchCurrentUserRole() {
         ? profile.role
         : "guest";
 
-    // 取得した自身のロールが guest だった場合、Googleフォーム（db.members）のメールアドレスと照合して自動昇格
     if (currentRole === "guest" && state.currentUser.email) {
       if (db.sheetSyncUrl) {
         try {
@@ -288,7 +365,10 @@ async function fetchCurrentUserRole() {
 
     state.userRole = currentRole;
 
-    // Supabase上のロール情報（開発管理者など）を名簿カード（db.members）の表示にも反映
+    // 1. Supabaseから共有データ（タスク・イベント・出欠・名簿）を読み込む
+    await loadCloudDb();
+
+    // 2. Supabase上のロール情報（開発管理者など）を名簿カード（db.members）の表示に反映
     await syncMemberRolesFromSupabase();
 
     return currentRole;
@@ -302,7 +382,6 @@ async function fetchCurrentUserRole() {
 // 管理者による他メンバーの役職（ロール）変更 → Supabase profiles.role へ自動反映
 // ==========================================================
 
-// 管理者が他メンバーの役職を変更した際に、Supabase の profiles.role を email で特定して更新する非同期関数
 async function updateMemberRole(targetEmail, newRole, options = {}) {
   const { previousRole = null, silent = false } = options;
   const email = normalizeEmail(targetEmail);
@@ -312,7 +391,6 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
     if (!silent) alert(msg);
   };
 
-  // 1. フロント側の事前権限チェック
   if (
     !canAssignMemberRole(state.userRole, nextRbacRole) ||
     (previousRole && !canAssignMemberRole(state.userRole, previousRole))
@@ -321,7 +399,6 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
     return { ok: false, reason: "forbidden" };
   }
 
-  // 2. 対象メンバーのメールアドレスを確認（.eq("email", email) で特定するため必須）
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     notify("更新に失敗しました：対象メンバーのメールアドレスが未登録のため、Supabaseのアカウントを特定できません。");
     return { ok: false, reason: "no_email" };
@@ -333,7 +410,6 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
   }
 
   try {
-    // 3. 対象ユーザーが Supabase の profiles テーブルに存在するか確認
     const { data: found, error: findErr } = await supabaseClient
       .from("profiles")
       .select("id, role")
@@ -351,7 +427,6 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
       return { ok: true, reason: "not_registered" };
     }
 
-    // 4. email カラムで対象ユーザーを特定して role を UPDATE
     const { data: updated, error: updateErr } = await supabaseClient
       .from("profiles")
       .update({ role: nextRbacRole })
@@ -365,12 +440,10 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
       return { ok: false, reason: "rls_denied" };
     }
 
-    // 自分自身の役職を変更した場合は即時UIへ反映
     if (state.currentUser && updated.some(row => row.id === state.currentUser.id)) {
       state.userRole = nextRbacRole;
     }
 
-    // 5. スプレッドシート（Googleフォーム回答）側の「役職」列も同時に更新（GAS Webhook設定時）
     const sheetResult = await syncRoleToSpreadsheet(email, nextLabel);
 
     notify(
@@ -385,13 +458,9 @@ async function updateMemberRole(targetEmail, newRole, options = {}) {
   }
 }
 
-// スプレッドシート（Googleフォーム回答シート）の「役職」列を GAS Webhook 経由で書き換える関数
 async function syncRoleToSpreadsheet(email, roleLabel) {
   if (!GAS_ROLE_WEBHOOK_URL) {
-    return {
-      ok: false,
-      message: ""
-    };
+    return { ok: false, message: "" };
   }
 
   try {
@@ -417,7 +486,6 @@ async function syncRoleToSpreadsheet(email, roleLabel) {
   }
 }
 
-// ヘッダー右上にスマホでも使えるログイン/ログアウトボタンを自動確保・更新するヘルパー
 function updateHeaderAuthButtons() {
   const authBtn = document.getElementById("btnGoogleAuth");
   if (authBtn) {
@@ -452,7 +520,6 @@ function updateHeaderAuthButtons() {
   }
 }
 
-// 取得した role に基づき、ログイン画面・タブ・ボタンの表示/非表示を一括制御する関数
 function applyRbacUi(userRole = state.userRole) {
   const validRole = RBAC_ROLES.includes(userRole) ? userRole : "guest";
   state.userRole = validRole;
@@ -510,7 +577,6 @@ function applyRbacUi(userRole = state.userRole) {
     btn.style.display = allowed ? "inline-block" : "none";
   });
 
-  // 閲覧権限のあるタブにいない場合（または未ログイン・guestの場合）
   if (!tabAccess[state.currentView]) {
     const firstAllowedView = Object.keys(tabAccess).find(k => tabAccess[k]);
     if (firstAllowedView) {
@@ -532,7 +598,6 @@ function applyRbacUi(userRole = state.userRole) {
       if (btnClearTab) btnClearTab.style.display = "none";
       if (eventsToggleWrap) eventsToggleWrap.style.display = "none";
 
-      // パターンA: まだGoogleログインしていない場合 → 「ログイン画面」を表示
       if (!state.currentUser) {
         if (titleEl) titleEl.textContent = "ログイン";
         if (countEl) countEl.textContent = "未ログイン";
@@ -581,7 +646,6 @@ function applyRbacUi(userRole = state.userRole) {
         return;
       }
 
-      // パターンB: Googleログイン済みだが、ロールが guest（未承認）の場合
       if (titleEl) titleEl.textContent = "アクセス権限の確認中";
       if (countEl) countEl.textContent = "未承認";
       if (contentEl) {
@@ -650,6 +714,11 @@ function applyRbacUi(userRole = state.userRole) {
   const searchBox = document.querySelector(".search-box");
   const dynamicFilters = document.getElementById("dynamicFilters");
 
+  // タスク・イベント等のデータは基本的に消去せず蓄積するため、一括削除ボタンは誤操作防止のため非表示
+  if (btnClearTab) {
+    btnClearTab.style.display = "none";
+  }
+
   if (state.currentView === "members") {
     const canSearchMember = hasPermission(validRole, "membersSearch");
     const canCardViewMember = hasPermission(validRole, "membersCardView");
@@ -676,9 +745,6 @@ function applyRbacUi(userRole = state.userRole) {
     if (searchBox) searchBox.style.display = canSearchTask ? "block" : "none";
     if (dynamicFilters) dynamicFilters.style.display = canSearchTask ? "flex" : "none";
     if (fab) fab.style.display = canEditTask ? "flex" : "none";
-    if (btnClearTab) {
-      btnClearTab.style.display = canEditTask && db.tasks.length > 0 ? "inline-block" : "none";
-    }
     document.querySelectorAll("[data-quick-status]").forEach(sel => {
       sel.style.display = canEditTask ? "inline-block" : "none";
     });
@@ -690,9 +756,6 @@ function applyRbacUi(userRole = state.userRole) {
     if (searchBox) searchBox.style.display = canSearchEvent ? "block" : "none";
     if (dynamicFilters) dynamicFilters.style.display = canSearchEvent ? "flex" : "none";
     if (fab) fab.style.display = canEditEvent ? "flex" : "none";
-    if (btnClearTab) {
-      btnClearTab.style.display = canEditEvent && db.events.length > 0 ? "inline-block" : "none";
-    }
     document.querySelectorAll("[data-event-detail]").forEach(card => {
       card.style.display = canCardViewEvent ? "flex" : "none";
     });
@@ -700,7 +763,6 @@ function applyRbacUi(userRole = state.userRole) {
     const canInputAttendance = hasPermission(validRole, "attendanceInput");
     const canManageDates = hasPermission(validRole, "attendanceManageDates");
     if (fab) fab.style.display = canInputAttendance ? "flex" : "none";
-    if (btnClearTab) btnClearTab.style.display = canManageDates ? "inline-block" : "none";
 
     const btnAddMonthQuick = document.getElementById("btnAddMonthQuick");
     const btnManageDates = document.getElementById("btnManageDates");
@@ -790,6 +852,19 @@ function generateSequentialId(prefix, count) {
   return prefix + numStr.slice(-4);
 }
 
+function generateNextTaskId(tasksList = []) {
+  let maxNum = tasksList.length;
+  tasksList.forEach(t => {
+    const m = String(t.taskId || "").match(/^T(\d+)$/i);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > maxNum) maxNum = n;
+    }
+  });
+  const numStr = "0000" + (maxNum + 1);
+  return "T" + numStr.slice(-4);
+}
+
 function generateNextEventId(eventsList = []) {
   let maxNum = eventsList.length;
   eventsList.forEach(ev => {
@@ -830,67 +905,32 @@ function inferIsoDateFromLabel(ym, dateLabel) {
   return `${y}-${String(monthNum).padStart(2, "0")}-${String(dayNum).padStart(2, "0")}`;
 }
 
+// 仮データ（サンプルタスク・サンプルイベント・サンプル出欠表）をすべて撤廃して空に設定
 const DEFAULT_DB = {
   sheetSyncUrl: DEFAULT_SHEET_URL,
-  lastSyncedAt: "2026/11/07 17:35:00",
+  lastSyncedAt: "",
   members: [
     {
       sysId: "m2301196",
       studentId: "2301196",
       name: "樋下田 大地",
       email: "",
-      role: "在校生",
+      role: "開発管理者",
       admissionYear: "2023年度",
       discordName: "ひげた",
       subjects: ["高等学校 公民"]
     }
   ],
-  tasks: [
-    { sysId: "t101a2b3", taskId: "T0001", taskName: "春の教職ガイダンス スライド作成", status: "完了" },
-    { sysId: "t202c3d4", taskId: "T0002", taskName: "模擬授業ワークショップ 教室予約", status: "進行中" },
-    { sysId: "t303e5f6", taskId: "T0003", taskName: "新入生歓迎会 チラシ印刷・配布準備", status: "進行中" },
-    { sysId: "t404a7b8", taskId: "T0004", taskName: "教員採用試験 対策勉強会アンケート集計", status: "未着手" },
-    { sysId: "t505c9d0", taskId: "T0005", taskName: "OB・OG座談会 講師依頼メール送信", status: "保留" }
-  ],
-  events: [
-    { sysId: "e100a0b1", eventId: "E0001", eventName: "定例ミーティング", eventDate: "2026-11-04" },
-    { sysId: "e101f2a3", eventId: "E0002", eventName: "新入生向け 教職履修相談会", eventDate: "2026-11-11" },
-    { sysId: "e202b4c5", eventId: "E0003", eventName: "第1回 模擬授業実践ワークショップ", eventDate: "2026-11-18" },
-    { sysId: "e303d6e7", eventId: "E0004", eventName: "現役教員OB・OGを囲む座談会", eventDate: "2026-11-25" },
-    { sysId: "e401c1d2", eventId: "E0005", eventName: "教採対策 勉強会①", eventDate: "2026-12-02" },
-    { sysId: "e402c3d4", eventId: "E0006", eventName: "模擬授業 振り返り会", eventDate: "2026-12-09" },
-    { sysId: "e403c5d6", eventId: "E0007", eventName: "年内最終 定例会・交流会", eventDate: "2026-12-16" }
-  ],
-  monthlySchedules: {
-    "2026-11": {
-      monthKey: "2026-11",
-      monthLabel: "2026年11月",
-      dates: [
-        { dateId: "d1104", isoDate: "2026-11-04", eventSysId: "e100a0b1", dateLabel: "11/4 (水) 17:30〜", title: "定例ミーティング" },
-        { dateId: "d1111", isoDate: "2026-11-11", eventSysId: "e101f2a3", dateLabel: "11/11 (水) 17:30〜", title: "新入生向け 教職履修相談会" },
-        { dateId: "d1118", isoDate: "2026-11-18", eventSysId: "e202b4c5", dateLabel: "11/18 (水) 17:30〜", title: "第1回 模擬授業実践ワークショップ" },
-        { dateId: "d1125", isoDate: "2026-11-25", eventSysId: "e303d6e7", dateLabel: "11/25 (水) 17:30〜", title: "現役教員OB・OGを囲む座談会" }
-      ],
-      responses: {}
-    },
-    "2026-12": {
-      monthKey: "2026-12",
-      monthLabel: "2026年12月",
-      dates: [
-        { dateId: "d1202", isoDate: "2026-12-02", eventSysId: "e401c1d2", dateLabel: "12/2 (水) 17:30〜", title: "教採対策 勉強会①" },
-        { dateId: "d1209", isoDate: "2026-12-09", eventSysId: "e402c3d4", dateLabel: "12/9 (水) 17:30〜", title: "模擬授業 振り返り会" },
-        { dateId: "d1216", isoDate: "2026-12-16", eventSysId: "e403c5d6", dateLabel: "12/16 (水) 17:30〜", title: "年内最終 定例会・交流会" }
-      ],
-      responses: {}
-    }
-  }
+  tasks: [],
+  events: [],
+  monthlySchedules: {}
 };
 
 let db = loadDb();
 let state = {
   currentView: "members",
   eventsLayout: "list",
-  selectedMonth: "2026-11",
+  selectedMonth: getTodayIsoString().slice(0, 7),
   searchQuery: "",
   roleFilter: "ALL",
   yearFilter: "ALL",
@@ -913,8 +953,11 @@ function loadDb() {
       return fresh;
     }
     const parsed = JSON.parse(raw);
-    if (!parsed.monthlySchedules) {
-      parsed.monthlySchedules = structuredClone(DEFAULT_DB.monthlySchedules);
+    if (!Array.isArray(parsed.members)) parsed.members = structuredClone(DEFAULT_DB.members);
+    if (!Array.isArray(parsed.tasks)) parsed.tasks = [];
+    if (!Array.isArray(parsed.events)) parsed.events = [];
+    if (!parsed.monthlySchedules || typeof parsed.monthlySchedules !== "object") {
+      parsed.monthlySchedules = {};
     }
     if (!parsed.sheetSyncUrl) {
       parsed.sheetSyncUrl = DEFAULT_SHEET_URL;
@@ -928,8 +971,10 @@ function loadDb() {
   }
 }
 
+// ローカル保存と同時に Supabase の `app_data` テーブルへクラウド永久保存を実行
 function saveDb() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  saveCloudDb();
 }
 
 // ==========================================================
@@ -1255,7 +1300,6 @@ function mergeMembersFromRows(rows) {
       if (admissionYear) existing.admissionYear = admissionYear;
       if (discordName) existing.discordName = discordName;
       if (subjects.length > 0) existing.subjects = subjects;
-      // スプレッドシート側に明示的な役職が入っている場合のみ反映（この直後にSupabase側のロールで再上書きされる）
       if (roleFromCsv && ROLE_OPTIONS.includes(roleFromCsv)) {
         existing.role = roleFromCsv;
       }
@@ -1395,7 +1439,6 @@ async function syncFromGoogleSheetUrl(rawUrl, silent = false) {
     const result = mergeMembersFromRows(rows);
     db.sheetSyncUrl = trimmed;
 
-    // スプレッドシート取り込み後に、Supabaseの profiles.role の情報を優先してメンバーカードへ上書き反映
     await syncMemberRolesFromSupabase();
 
     saveDb();
@@ -1612,13 +1655,14 @@ function renderView() {
     btn.classList.toggle("active", btn.dataset.view === state.currentView);
   });
 
+  if (btnClearTab) {
+    btnClearTab.style.display = "none";
+  }
+
   if (state.currentView === "members") {
     titleEl.textContent = "メンバー";
     fabLabel.textContent = "メンバー追加（Googleフォーム ↗）";
     eventsToggleWrap.style.display = "none";
-    if (btnClearTab) {
-      btnClearTab.style.display = "none";
-    }
 
     const filtered = db.members.filter(m => {
       const subjectsArr = Array.isArray(m.subjects) ? m.subjects : [];
@@ -1643,7 +1687,7 @@ function renderView() {
     const syncBannerHtml = `
       <div class="sync-banner">
         <div>
-          <strong>🔗 Googleフォーム連携:</strong>
+          <strong>🔗 Googleフォーム & クラウド連携:</strong>
           ${db.sheetSyncUrl
             ? `連携済み（最終同期: ${escapeHtml(db.lastSyncedAt || "未実行")}）`
             : `未設定 — Googleフォームの回答を自動反映するには「連携設定」から回答先スプレッドシートURLまたはCSVを登録してください`
@@ -1718,10 +1762,6 @@ function renderView() {
     titleEl.textContent = "タスク";
     fabLabel.textContent = "タスク追加";
     eventsToggleWrap.style.display = "none";
-    if (btnClearTab) {
-      btnClearTab.textContent = "🗑️ タスクを全件削除";
-      btnClearTab.style.display = db.tasks.length > 0 ? "inline-block" : "none";
-    }
 
     const filtered = db.tasks.filter(t => {
       const jpDue =
@@ -1744,7 +1784,7 @@ function renderView() {
     countEl.textContent = `${filtered.length}件`;
 
     if (filtered.length === 0) {
-      contentEl.innerHTML = `<div class="empty-state">該当するタスクがありません（進捗フィルターのチェック状態または検索ワードをご確認ください）。</div>`;
+      contentEl.innerHTML = `<div class="empty-state">登録されているタスクはありません。右下の「＋ タスク追加」から新しいタスクを登録できます（Supabaseに自動保存されます）。</div>`;
       applyRbacUi(state.userRole);
       return;
     }
@@ -1790,10 +1830,6 @@ function renderView() {
     titleEl.textContent = "イベント";
     fabLabel.textContent = "イベント追加";
     eventsToggleWrap.style.display = "block";
-    if (btnClearTab) {
-      btnClearTab.textContent = "🗑️ イベントを全件削除";
-      btnClearTab.style.display = db.events.length > 0 ? "inline-block" : "none";
-    }
 
     refreshAllEventStatuses(db.events);
 
@@ -1817,7 +1853,7 @@ function renderView() {
     countEl.textContent = `${filtered.length}件`;
 
     if (filtered.length === 0) {
-      contentEl.innerHTML = `<div class="empty-state">該当するイベント企画がありません（ステータスフィルターのチェック状態または検索ワードをご確認ください）。</div>`;
+      contentEl.innerHTML = `<div class="empty-state">登録されているイベント企画はありません。右下の「＋ イベント追加」または「出欠調整」タブからイベントを登録できます（Supabaseに自動保存されます）。</div>`;
       applyRbacUi(state.userRole);
       return;
     }
@@ -1887,10 +1923,6 @@ function renderView() {
       });
     });
   } else if (state.currentView === "attendance") {
-    if (btnClearTab) {
-      btnClearTab.textContent = "🗑️ この月の出欠回答をリセット";
-      btnClearTab.style.display = "inline-block";
-    }
     renderAttendanceView();
     return;
   }
@@ -1968,8 +2000,31 @@ function renderAttendanceView() {
     state.selectedMonth = monthKeys[0];
   }
   const sheet = db.monthlySchedules[state.selectedMonth];
-  const dates = sheet ? sheet.dates : [];
-  const responses = sheet ? sheet.responses : {};
+
+  if (!sheet || monthKeys.length === 0) {
+    countEl.textContent = "0日程";
+    contentEl.innerHTML = `
+      <div class="attendance-top-bar">
+        <div class="month-selector-group">
+          <button type="button" class="btn btn-primary" id="btnAddMonthQuick">
+            ＋ 最初の対象月（出欠表）を作成する
+          </button>
+        </div>
+      </div>
+      <div class="empty-state">
+        まだ出欠調整の対象月が作成されていません。<br />
+        上の「<strong>＋ 最初の対象月（出欠表）を作成する</strong>」ボタン、または「イベント」タブでイベントを追加すると出欠表が自動生成されます。
+      </div>
+    `;
+    document.getElementById("btnAddMonthQuick")?.addEventListener("click", () => {
+      openAddMonthModal();
+    });
+    applyRbacUi(state.userRole);
+    return;
+  }
+
+  const dates = sheet.dates || [];
+  const responses = sheet.responses || {};
 
   const answeredCount = db.members.filter(m => responses[m.sysId]).length;
   countEl.textContent = `回答 ${answeredCount}/${db.members.length}名`;
@@ -2150,7 +2205,7 @@ function resetFormModalButtons(isDetailMode = false) {
   }
 }
 
-// メンバー詳細モーダルを開く（クイック役職変更＆「権限を更新する」ボタン搭載）
+// メンバー詳細モーダルを開く
 function openMemberDetailModal(sysId) {
   const rec = db.members.find(m => m.sysId === sysId);
   if (!rec) return;
@@ -2557,6 +2612,9 @@ function openAddMonthModal() {
   }
   titleEl.textContent = "📅 新しい対象月（出欠表）の追加";
 
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth() + 1;
   const years = [2026, 2027, 2028, 2029, 2030];
   const months = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   const weekdayOptions = [
@@ -2574,10 +2632,10 @@ function openAddMonthModal() {
       <label class="form-label">1. 追加する「年・月」を選択</label>
       <div style="display: flex; gap: 8px; align-items: center;">
         <select id="addMonthYear" class="form-control" style="font-weight: 700;">
-          ${years.map(y => `<option value="${y}" ${y === 2027 ? "selected" : ""}>${y}年</option>`).join("")}
+          ${years.map(y => `<option value="${y}" ${y === curY ? "selected" : ""}>${y}年</option>`).join("")}
         </select>
         <select id="addMonthNum" class="form-control" style="font-weight: 700;">
-          ${months.map(m => `<option value="${m}" ${m === 1 ? "selected" : ""}>${m}月</option>`).join("")}
+          ${months.map(m => `<option value="${m}" ${m === curM ? "selected" : ""}>${m}月</option>`).join("")}
         </select>
       </div>
     </div>
@@ -2813,6 +2871,7 @@ function openManageDatesModal() {
 
   btnDelete.style.display = "none";
   const sheet = db.monthlySchedules[state.selectedMonth];
+  if (!sheet) return;
   titleEl.textContent = `⚙️ ${sheet.monthLabel} の候補日管理・新規月作成`;
 
   const defaultIsoDate = `${state.selectedMonth}-28`;
@@ -3053,7 +3112,7 @@ function openFormModal(sysId = null) {
       <p class="form-hint">※「システムID」は自動付与され、SHOW? = false のため画面上には表示されません。</p>
     `;
   } else if (state.currentView === "tasks") {
-    const nextTaskId = generateSequentialId("T", db.tasks.length);
+    const nextTaskId = generateNextTaskId(db.tasks);
     const rec = sysId
       ? db.tasks.find(t => t.sysId === sysId)
       : { taskId: nextTaskId, taskName: "", status: "未着手", assignee: "", dueDate: "", memo: "" };
@@ -3746,31 +3805,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  document.getElementById("btnClearCurrentTab").addEventListener("click", () => {
-    if (state.currentView === "members") {
-      if (!confirm(`現在登録されているメンバー（${db.members.length}名）をすべて削除して空にしますか？`)) return;
-      db.members = [];
-      Object.values(db.monthlySchedules || {}).forEach(sheet => {
-        sheet.responses = {};
-      });
-    } else if (state.currentView === "tasks") {
-      if (!confirm(`現在登録されているタスク（${db.tasks.length}件）をすべて削除して空にしますか？`)) return;
-      db.tasks = [];
-    } else if (state.currentView === "events") {
-      if (!confirm(`現在登録されているイベント（${db.events.length}件）をすべて削除して空にしますか？`)) return;
-      db.events.forEach(ev => removeEventFromMonthlySchedule(ev.sysId));
-      db.events = [];
-    } else if (state.currentView === "attendance") {
-      const sheet = db.monthlySchedules[state.selectedMonth];
-      if (!sheet) return;
-      if (!confirm(`${sheet.monthLabel}の出欠回答データをすべてリセットしますか？`)) return;
-      sheet.responses = {};
-    }
-    saveDb();
-    renderFilters();
-    renderView();
-  });
-
   document.getElementById("btnOpenSyncModal")?.addEventListener("click", openSyncModal);
   document.getElementById("btnCloseSyncModal")?.addEventListener("click", closeSyncModal);
   document.getElementById("btnCloseSyncModalFooter")?.addEventListener("click", closeSyncModal);
@@ -3808,9 +3842,16 @@ document.addEventListener("DOMContentLoaded", () => {
     reader.readAsText(file, "UTF-8");
   });
 
-  window.addEventListener("focus", () => {
-    if (db.sheetSyncUrl && state.currentUser && hasPermission(state.userRole, "membersTabView")) {
-      syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
+  // 画面に戻ってきた際、Supabaseから最新データを再取得して他メンバーの更新も同期
+  window.addEventListener("focus", async () => {
+    if (state.currentUser && state.userRole !== "guest") {
+      await loadCloudDb();
+      if (db.sheetSyncUrl && hasPermission(state.userRole, "membersTabView")) {
+        await syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
+      } else {
+        renderFilters();
+        renderView();
+      }
     }
   });
 
@@ -3876,7 +3917,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // 初回起動時にロールを取得して描画
+  // 初回起動時にロールとクラウドDBを取得して描画
   fetchCurrentUserRole().then(role => {
     applyRbacUi(role);
     renderFilters();
