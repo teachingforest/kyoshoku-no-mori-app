@@ -1,7 +1,8 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当・未回答通知バッジ）」+ スワイプタブ切替 + Supabase RBAC & クラウドDB永久保存対応)
+// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当・未回答通知バッジ）」+ 運営限定イベント + タスク/イベント3日前・1日前・当日プッシュ通知 + スワイプタブ切替 + Supabase RBAC & クラウドDB永久保存対応)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
+const PUSH_NOTIFIED_LOG_KEY = "kyoshoku_no_mori_push_log_v1";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
@@ -43,6 +44,7 @@ const RBAC_ROLE_LABELS = {
   guest: "未承認"
 };
 
+// 幹部・運営メンバー4役職の共通グループ（運営限定イベント閲覧・プッシュ通知の対象グループ）
 const ADMIN_ROLES = ["president", "vice_president", "manager", "developer"];
 
 // 2. 各種権限と役職ごとの権限マトリクス定義
@@ -82,6 +84,20 @@ function hasPermission(userRole, permissionKey) {
     RBAC_ROLES.includes(userRole) ? userRole : mapMemberRoleToRbacRole(userRole);
   const allowed = RBAC_PERMISSIONS[permissionKey] || [];
   return allowed.includes(normalizedRole);
+}
+
+// 指定したロール（内部ロール値または日本語役職名）が運営メンバー（ADMIN_ROLES）かどうかを判定
+function isAdminRole(userRole = state.userRole) {
+  const normalizedRole =
+    RBAC_ROLES.includes(userRole) ? userRole : mapMemberRoleToRbacRole(userRole);
+  return ADMIN_ROLES.includes(normalizedRole);
+}
+
+// 対象月シートの候補日のうち、指定したロールのユーザーが閲覧可能な日程リストを返す
+function getVisibleDatesForRole(sheet, userRole = state.userRole) {
+  if (!sheet || !Array.isArray(sheet.dates)) return [];
+  const isAdmin = isAdminRole(userRole);
+  return sheet.dates.filter(d => !d.adminOnly || isAdmin);
 }
 
 function canAssignMemberRole(userRole, targetRole) {
@@ -178,10 +194,19 @@ function isMonthAnsweredByMember(sheet, memberSysId) {
     return true;
   }
   if (!memberSysId) return true;
+
+  const memberObj = db.members.find(m => m.sysId === memberSysId);
+  const memberRole = memberObj ? memberObj.role : state.userRole;
+  const visibleDates = getVisibleDatesForRole(sheet, memberRole);
+
+  if (visibleDates.length === 0) {
+    return true;
+  }
+
   const resp = sheet.responses?.[memberSysId];
   if (!resp || !resp.marks) return false;
 
-  return sheet.dates.every(d => {
+  return visibleDates.every(d => {
     const mk = resp.marks[d.dateId];
     return MARK_OPTIONS.includes(mk);
   });
@@ -243,6 +268,432 @@ function updateAttendanceNotificationBadge() {
 }
 
 // ==========================================================
+// 運営メンバー向けプッシュ通知機能（タスク・イベントの3日前 / 1日前 / 当日）
+// ==========================================================
+const REMINDER_TARGET_DAYS = [3, 1, 0];
+
+// YYYY-MM-DD と今日（ローカル日付）の差分日数を計算（当日=0, 明日=1, 3日後=3）
+function getDaysUntilIsoDate(isoDate) {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
+  const [ty, tm, td] = getTodayIsoString().split("-").map(Number);
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const todayUtc = Date.UTC(ty, tm - 1, td);
+  const targetUtc = Date.UTC(y, m - 1, d);
+  return Math.round((targetUtc - todayUtc) / (1000 * 60 * 60 * 24));
+}
+
+// 今日時点で通知対象（3日前・1日前・当日）となるタスク＆イベントのリマインド一覧を生成
+function getActiveAdminReminders() {
+  if (!isAdminRole(state.userRole)) return [];
+
+  const reminders = [];
+  const todayIso = getTodayIsoString();
+
+  // 1. タスクの判定（ステータスが「完了」以外 ＆ 期日まであと 3日 / 1日 / 0日）
+  (db.tasks || []).forEach(t => {
+    if (!t || t.status === "完了" || !t.dueDate) return;
+    const diff = getDaysUntilIsoDate(t.dueDate);
+    if (diff !== null && REMINDER_TARGET_DAYS.includes(diff)) {
+      reminders.push({
+        key: `task_${t.sysId}_${todayIso}_d${diff}`,
+        type: "task",
+        sysId: t.sysId,
+        diffDays: diff,
+        targetDate: t.dueDate,
+        title: t.taskName,
+        status: t.status,
+        message: `タスク「${t.taskName}」期日まであと${diff}日`
+      });
+    }
+  });
+
+  // 2. イベントの判定（開催日まであと 3日 / 1日 / 0日）
+  (db.events || []).forEach(ev => {
+    if (!ev || !ev.eventDate) return;
+    const diff = getDaysUntilIsoDate(ev.eventDate);
+    if (diff !== null && REMINDER_TARGET_DAYS.includes(diff)) {
+      reminders.push({
+        key: `event_${ev.sysId}_${todayIso}_d${diff}`,
+        type: "event",
+        sysId: ev.sysId,
+        diffDays: diff,
+        targetDate: ev.eventDate,
+        title: ev.eventName,
+        adminOnly: Boolean(ev.adminOnly),
+        message: `${diff}日後に「${ev.eventName}」全体にリマインド`
+      });
+    }
+  });
+
+  // 当日（0日）→ 1日前 → 3日前 の優先順でソート
+  reminders.sort((a, b) => a.diffDays - b.diffDays);
+  return reminders;
+}
+
+function loadPushNotifiedLog() {
+  try {
+    const raw = localStorage.getItem(PUSH_NOTIFIED_LOG_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function savePushNotifiedLog(logObj) {
+  try {
+    localStorage.setItem(PUSH_NOTIFIED_LOG_KEY, JSON.stringify(logObj));
+  } catch (_) {}
+}
+
+// ブラウザの Web Notifications API でOSのプッシュ通知を送信
+function sendBrowserNativeNotification(reminder) {
+  if (!("Notification" in window)) return false;
+  if (Notification.permission !== "granted") return false;
+
+  try {
+    const title =
+      reminder.type === "task"
+        ? "⏰ タスク期日リマインド（教職の森）"
+        : "📢 イベント告知リマインド（教職の森）";
+
+    const n = new Notification(title, {
+      body: reminder.message,
+      tag: reminder.key
+    });
+
+    n.onclick = () => {
+      window.focus();
+      if (reminder.type === "task") {
+        state.currentView = "tasks";
+        renderFilters();
+        renderView();
+        openTaskDetailModal(reminder.sysId);
+      } else {
+        state.currentView = "events";
+        renderFilters();
+        renderView();
+        openEventDetailModal(reminder.sysId);
+      }
+      n.close();
+    };
+    return true;
+  } catch (err) {
+    console.warn("Native notification failed:", err);
+    return false;
+  }
+}
+
+// 画面上部にアプリ内プッシュ通知トーストバナーを表示（スマホ内ブラウザでも確実に表示）
+function showInAppPushToast(reminders) {
+  if (!Array.isArray(reminders) || reminders.length === 0) return;
+
+  let container = document.getElementById("pushToastContainer");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "pushToastContainer";
+    container.style.cssText = [
+      "position: fixed",
+      "top: 14px",
+      "left: 50%",
+      "transform: translateX(-50%)",
+      "width: calc(100% - 24px)",
+      "max-width: 460px",
+      "z-index: 90",
+      "display: flex",
+      "flex-direction: column",
+      "gap: 8px",
+      "pointer-events: none"
+    ].join(";");
+    document.body.appendChild(container);
+  }
+
+  container.innerHTML = `
+    <div style="pointer-events: auto; background: #1e293b; color: #f8fafc; border-left: 5px solid #f59e0b; border-radius: 12px; padding: 12px 14px; box-shadow: 0 12px 28px rgba(0,0,0,0.28); font-size: 0.84rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <strong style="color: #fbbf24; font-size: 0.86rem;">🔔 運営メンバー向けリマインド通知（${reminders.length}件）</strong>
+        <button type="button" id="btnClosePushToast" style="background: transparent; border: none; color: #94a3b8; font-size: 1.1rem; cursor: pointer; padding: 0 4px;">×</button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 5px; max-height: 150px; overflow-y: auto;">
+        ${reminders
+          .map(
+            r => `
+              <div
+                data-toast-jump-type="${escapeHtml(r.type)}"
+                data-toast-jump-id="${escapeHtml(r.sysId)}"
+                style="background: rgba(255,255,255,0.08); padding: 7px 10px; border-radius: 8px; cursor: pointer; font-weight: 700; display: flex; align-items: center; gap: 6px;"
+              >
+                <span>${r.type === "task" ? "✅" : "📅"}</span>
+                <span style="flex: 1;">${escapeHtml(r.message)}</span>
+                <span style="font-size: 0.72rem; color: #cbd5e1;">詳細 ›</span>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+
+  document.getElementById("btnClosePushToast")?.addEventListener("click", () => {
+    container.innerHTML = "";
+  });
+
+  container.querySelectorAll("[data-toast-jump-id]").forEach(item => {
+    item.addEventListener("click", () => {
+      const type = item.dataset.toastJumpType;
+      const sysId = item.dataset.toastJumpId;
+      container.innerHTML = "";
+      if (type === "task") {
+        state.currentView = "tasks";
+        renderFilters();
+        renderView();
+        openTaskDetailModal(sysId);
+      } else {
+        state.currentView = "events";
+        renderFilters();
+        renderView();
+        openEventDetailModal(sysId);
+      }
+    });
+  });
+
+  // 10秒後に自動でフェードアウト
+  setTimeout(() => {
+    if (container) container.innerHTML = "";
+  }, 10000);
+}
+
+// 運営メンバーの通知チェック＆未送信分のプッシュ通知発火（起動時・データ更新時に実行）
+function checkAndTriggerAdminPushNotifications(forceShowToast = false) {
+  updateHeaderNotificationBell();
+
+  if (!isAdminRole(state.userRole)) return;
+
+  const reminders = getActiveAdminReminders();
+  if (reminders.length === 0) return;
+
+  const log = loadPushNotifiedLog();
+  const newlyTriggered = [];
+
+  reminders.forEach(r => {
+    if (!log[r.key]) {
+      sendBrowserNativeNotification(r);
+      log[r.key] = Date.now();
+      newlyTriggered.push(r);
+    }
+  });
+
+  if (newlyTriggered.length > 0) {
+    savePushNotifiedLog(log);
+    showInAppPushToast(newlyTriggered);
+  } else if (forceShowToast) {
+    showInAppPushToast(reminders);
+  }
+}
+
+// ヘッダー右上に運営メンバー専用の「🔔 通知」ボタン＆件数バッジを表示・更新
+function updateHeaderNotificationBell() {
+  const headerActions = document.querySelector(".header-actions");
+  if (!headerActions) return;
+
+  let bellBtn = document.getElementById("btnHeaderNotifications");
+  const isAdmin = isAdminRole(state.userRole);
+
+  if (!isAdmin) {
+    if (bellBtn) bellBtn.style.display = "none";
+    return;
+  }
+
+  if (!bellBtn) {
+    bellBtn = document.createElement("button");
+    bellBtn.type = "button";
+    bellBtn.className = "btn-header";
+    bellBtn.id = "btnHeaderNotifications";
+    bellBtn.style.position = "relative";
+    bellBtn.title = "タスク・イベントのリマインド通知を確認";
+    bellBtn.addEventListener("click", openNotificationsModal);
+    headerActions.insertBefore(bellBtn, headerActions.firstChild);
+  }
+
+  bellBtn.style.display = "inline-flex";
+  const reminders = getActiveAdminReminders();
+  const count = reminders.length;
+
+  bellBtn.innerHTML = `
+    🔔 <span class="btn-header-text">通知</span>
+    ${count > 0
+      ? `<span style="position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: #dc2626; color: #fff; font-size: 0.68rem; font-weight: 800; line-height: 18px; text-align: center; border: 1.5px solid #fff;">${count}</span>`
+      : ""
+    }
+  `;
+}
+
+// 「🔔 通知」ボタンを押したときに開く運営メンバー向けリマインド管理モーダル
+function openNotificationsModal() {
+  state.modalMode = "notificationsModal";
+  state.editingSysId = null;
+  resetFormModalButtons( true );
+
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+  const btnSwitchToEdit = document.getElementById("btnSwitchToEdit");
+
+  if (btnDelete) btnDelete.style.display = "none";
+  if (btnSwitchToEdit) btnSwitchToEdit.style.display = "none";
+
+  titleEl.textContent = "🔔 運営メンバー向けリマインド通知";
+
+  const reminders = getActiveAdminReminders();
+  const perm = "Notification" in window ? Notification.permission : "unsupported";
+  const permLabel =
+    perm === "granted"
+      ? "✅ プッシュ通知：許可済み（有効）"
+      : perm === "denied"
+      ? "⚠️ プッシュ通知：ブラウザ設定でブロックされています"
+      : perm === "default"
+      ? "🔕 プッシュ通知：未設定（下のボタンからONにできます）"
+      : "ℹ️ このブラウザはOSプッシュ通知非対応です（アプリ内通知バナーで動作します）";
+
+  bodyEl.innerHTML = `
+    <div class="detail-item" style="background: #f0fdf4; border-color: #bbf7d0;">
+      <div class="detail-label" style="color: #166534;">📲 デバイスのプッシュ通知設定</div>
+      <div style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); margin-top: 4px;">
+        ${permLabel}
+      </div>
+      <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 4px; line-height: 1.5;">
+        タスク（未完了）とイベントの<strong>3日前・1日前・当日（0日後）</strong>に、運営メンバーへ自動でプッシュ通知を行います。
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+        ${perm === "default"
+          ? `<button type="button" class="btn btn-primary" id="btnEnableBrowserPush" style="font-size: 0.8rem; padding: 6px 12px;">🔔 プッシュ通知をONにする</button>`
+          : ""
+        }
+        <button type="button" class="btn btn-secondary" id="btnTestPushNow" style="font-size: 0.8rem; padding: 6px 12px;">
+          📣 今すぐ通知をテスト送信
+        </button>
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-top: 4px;">
+      <label class="form-label">
+        📋 本日のリマインド対象（3日前・1日前・当日：${reminders.length}件）
+      </label>
+      ${reminders.length === 0
+        ? `
+          <div class="empty-state" style="padding: 24px 14px;">
+            本日通知対象（3日前・1日前・当日）の未完了タスクやイベントはありません。
+          </div>
+        `
+        : `
+          <div class="list-stack" style="margin-top: 4px;">
+            ${reminders
+              .map(r => {
+                const badgeBg =
+                  r.diffDays === 0
+                    ? "background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;"
+                    : r.diffDays === 1
+                    ? "background: #fef3c7; color: #92400e; border: 1px solid #fde68a;"
+                    : "background: #e0f2fe; color: #075985; border: 1px solid #bae6fd;";
+                const dayLabel = r.diffDays === 0 ? "当日（0日後）" : `${r.diffDays}日前`;
+                return `
+                  <div
+                    class="list-row item-card-clickable"
+                    data-reminder-type="${escapeHtml(r.type)}"
+                    data-reminder-id="${escapeHtml(r.sysId)}"
+                    style="padding: 12px 14px; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px;"
+                  >
+                    <div style="display: flex; flex-direction: column; gap: 4px;">
+                      <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                        <span class="badge" style="${badgeBg}">${dayLabel}</span>
+                        <span class="badge badge-id">${escapeHtml(r.targetDate)}</span>
+                        ${r.type === "task"
+                          ? `<span class="badge ${getStatusBadgeClass(r.status)}">${escapeHtml(r.status)}</span>`
+                          : `<span class="badge event-status-active">イベント</span>`
+                        }
+                      </div>
+                      <div style="font-size: 0.95rem; font-weight: 800; color: var(--text-main); margin-top: 2px;">
+                        ${escapeHtml(r.message)}
+                      </div>
+                    </div>
+                    <span class="card-chevron">›</span>
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+      }
+    </div>
+  `;
+
+  document.getElementById("btnEnableBrowserPush")?.addEventListener("click", async () => {
+    if (!("Notification" in window)) {
+      alert("お使いのブラウザはOSのプッシュ通知に対応していません。");
+      return;
+    }
+    const res = await Notification.requestPermission();
+    if (res === "granted") {
+      new Notification("🌲 教職の森 運営管理アプリ", {
+        body: "プッシュ通知が有効になりました！タスクとイベントの3日前・1日前・当日に通知します。"
+      });
+    }
+    openNotificationsModal();
+  });
+
+  document.getElementById("btnTestPushNow")?.addEventListener("click", async () => {
+    if ("Notification" in window && Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+    if (reminders.length > 0) {
+      reminders.forEach(r => sendBrowserNativeNotification(r));
+      showInAppPushToast(reminders);
+    } else {
+      const sample = [
+        {
+          key: "test_task",
+          type: "task",
+          sysId: "",
+          diffDays: 3,
+          message: "タスク「サンプル資料作成」期日まであと3日"
+        },
+        {
+          key: "test_event",
+          type: "event",
+          sysId: "",
+          diffDays: 3,
+          message: "3日後に「定例ミーティング」全体にリマインド"
+        }
+      ];
+      sample.forEach(s => sendBrowserNativeNotification(s));
+      showInAppPushToast(sample);
+    }
+  });
+
+  bodyEl.querySelectorAll("[data-reminder-id]").forEach(row => {
+    row.addEventListener("click", () => {
+      const type = row.dataset.reminderType;
+      const sysId = row.dataset.reminderId;
+      if (!sysId) return;
+      closeFormModal();
+      if (type === "task") {
+        state.currentView = "tasks";
+        renderFilters();
+        renderView();
+        openTaskDetailModal(sysId);
+      } else {
+        state.currentView = "events";
+        renderFilters();
+        renderView();
+        openEventDetailModal(sysId);
+      }
+    });
+  });
+
+  modal.classList.add("open");
+}
+
+// ==========================================================
 // スマホ画面の左右スワイプ操作でタブを移動する機能
 // ==========================================================
 function switchViewWithDirection(targetView, direction = null) {
@@ -255,11 +706,10 @@ function switchViewWithDirection(targetView, direction = null) {
   renderFilters();
   renderView();
 
-  // スワイプ方向に応じたスライドアニメーション適用と先頭スクロール
   const contentEl = document.getElementById("viewContent");
   if (contentEl && direction) {
     contentEl.classList.remove("swipe-in-right", "swipe-in-left");
-    void contentEl.offsetWidth; // reflow
+    void contentEl.offsetWidth;
     contentEl.classList.add(direction === "next" ? "swipe-in-right" : "swipe-in-left");
   }
 
@@ -282,7 +732,6 @@ function initSwipeTabNavigation() {
         return;
       }
 
-      // モーダルが開いている最中や入力要素上のタッチはスワイプタブ移動の対象外
       if (document.querySelector(".modal-backdrop.open")) {
         ignoreSwipe = true;
         return;
@@ -294,7 +743,6 @@ function initSwipeTabNavigation() {
         return;
       }
 
-      // 出欠表やDB表などの横スクロール可能なエリア上では、表の横スクロールを優先
       const hScrollable = targetEl?.closest(".matrix-scroll, .db-table-wrap");
       if (hScrollable && hScrollable.scrollWidth > hScrollable.clientWidth) {
         ignoreSwipe = true;
@@ -318,7 +766,6 @@ function initSwipeTabNavigation() {
       const deltaY = e.changedTouches[0].clientY - touchStartY;
       const elapsed = Date.now() - touchStartTime;
 
-      // 800ms以内、横移動55px以上、かつ縦スクロールよりも明確に横方向（1.4倍以上）のスワイプのみ判定
       if (
         elapsed > 800 ||
         Math.abs(deltaX) < 55 ||
@@ -327,7 +774,6 @@ function initSwipeTabNavigation() {
         return;
       }
 
-      // 現在表示中（閲覧権限のある）タブ一覧を取得
       const visibleViews = Array.from(document.querySelectorAll(".bottom-nav .nav-item"))
         .filter(btn => btn.style.display !== "none")
         .map(btn => btn.dataset.view)
@@ -339,10 +785,8 @@ function initSwipeTabNavigation() {
       if (currentIdx === -1) return;
 
       if (deltaX < 0 && currentIdx < visibleViews.length - 1) {
-        // 左へスワイプ（指を右→左へ）: 次のタブへ移動
         switchViewWithDirection(visibleViews[currentIdx + 1], "next");
       } else if (deltaX > 0 && currentIdx > 0) {
-        // 右へスワイプ（指を左→右へ）: 前のタブへ移動
         switchViewWithDirection(visibleViews[currentIdx - 1], "prev");
       }
     },
@@ -723,6 +1167,7 @@ function applyRbacUi(userRole = state.userRole) {
 
   updateHeaderAuthButtons();
   updateAttendanceNotificationBadge();
+  updateHeaderNotificationBell();
 
   const tabAccess = {
     members: hasPermission(validRole, "membersTabView"),
@@ -1128,6 +1573,7 @@ let state = {
   subjectFilter: "ALL",
   statusFilters: [...STATUS_OPTIONS],
   eventStatusFilters: [...EVENT_STATUS_OPTIONS],
+  eventVisibilityFilter: "ALL",
   editingSysId: null,
   modalMode: "record",
   activeDbSheet: "members",
@@ -1165,11 +1611,12 @@ function loadDb() {
 function saveDb() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
   updateAttendanceNotificationBadge();
+  checkAndTriggerAdminPushNotifications(false);
   saveCloudDb();
 }
 
 // ==========================================================
-// 「イベント」と「出欠調整」の双方向連携ロジック
+// 「イベント」と「出欠調整」の双方向連携ロジック（運営限定フラグ対応）
 // ==========================================================
 
 function sortSheetDates(sheet) {
@@ -1224,6 +1671,7 @@ function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db)
     dateEntry.eventSysId = ev.sysId;
     dateEntry.isoDate = ev.eventDate;
     dateEntry.title = ev.eventName;
+    dateEntry.adminOnly = Boolean(ev.adminOnly);
     if (oldIso !== ev.eventDate || !dateEntry.dateLabel) {
       dateEntry.dateLabel = formatDateLabelFromIso(ev.eventDate, "17:30〜");
     }
@@ -1233,7 +1681,8 @@ function syncEventToMonthlySchedule(ev, previousEventDate = null, targetDb = db)
       isoDate: ev.eventDate,
       eventSysId: ev.sysId,
       dateLabel: formatDateLabelFromIso(ev.eventDate, "17:30〜"),
-      title: ev.eventName
+      title: ev.eventName,
+      adminOnly: Boolean(ev.adminOnly)
     });
   }
 
@@ -1274,6 +1723,11 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     if (linked) {
       linked.eventName = dateObj.title;
       if (dateObj.isoDate) linked.eventDate = dateObj.isoDate;
+      if (typeof dateObj.adminOnly === "boolean") {
+        linked.adminOnly = dateObj.adminOnly;
+      } else {
+        dateObj.adminOnly = Boolean(linked.adminOnly);
+      }
       return linked;
     }
   }
@@ -1283,6 +1737,11 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
   );
   if (sameEvent) {
     dateObj.eventSysId = sameEvent.sysId;
+    if (typeof dateObj.adminOnly === "boolean") {
+      sameEvent.adminOnly = dateObj.adminOnly;
+    } else {
+      dateObj.adminOnly = Boolean(sameEvent.adminOnly);
+    }
     return sameEvent;
   }
 
@@ -1290,7 +1749,8 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     sysId: "e_" + generateUniqueId(),
     eventId: generateNextEventId(targetDb.events),
     eventName: dateObj.title || "サークル活動",
-    eventDate: dateObj.isoDate || ""
+    eventDate: dateObj.isoDate || "",
+    adminOnly: Boolean(dateObj.adminOnly)
   };
   getAutoEventStatus(newEv);
   targetDb.events.push(newEv);
@@ -1336,14 +1796,21 @@ function reconcileEventsAndSchedules(targetDb = db) {
         if (candidateEv) {
           d.eventSysId = candidateEv.sysId;
           d.title = candidateEv.eventName;
+          d.adminOnly = Boolean(candidateEv.adminOnly);
         } else {
           syncScheduleDateToEvents(ym, d, targetDb);
+        }
+      } else {
+        const linkedEv = targetDb.events.find(e => e.sysId === d.eventSysId);
+        if (linkedEv) {
+          d.adminOnly = Boolean(linkedEv.adminOnly);
         }
       }
     });
   });
 
   targetDb.events.forEach(ev => {
+    ev.adminOnly = Boolean(ev.adminOnly);
     getAutoEventStatus(ev);
     if (ev.eventDate) {
       syncEventToMonthlySchedule(ev, null, targetDb);
@@ -1775,6 +2242,7 @@ function renderFilters() {
     });
   } else if (state.currentView === "events") {
     const allChecked = state.eventStatusFilters.length === EVENT_STATUS_OPTIONS.length;
+    const isAdmin = isAdminRole(state.userRole);
     container.innerHTML = `
       <div class="multi-filter-group" role="group" aria-label="ステータスで絞り込み（複数選択可）">
         <span class="multi-filter-label">ステータス:</span>
@@ -1791,6 +2259,13 @@ function renderFilters() {
           ${allChecked ? "全解除" : "すべて選択"}
         </button>
       </div>
+      ${isAdmin ? `
+        <select id="filterEventVisibility" class="filter-select" aria-label="公開範囲で絞り込み" style="margin-left: auto;">
+          <option value="ALL" ${state.eventVisibilityFilter === "ALL" ? "selected" : ""}>公開範囲: すべて</option>
+          <option value="PUBLIC" ${state.eventVisibilityFilter === "PUBLIC" ? "selected" : ""}>🌐 全員公開のみ</option>
+          <option value="ADMIN_ONLY" ${state.eventVisibilityFilter === "ADMIN_ONLY" ? "selected" : ""}>🔒 運営限定のみ</option>
+        </select>
+      ` : ""}
     `;
     container.querySelectorAll('input[name="eventStatusFilter"]').forEach(cb => {
       cb.addEventListener("change", () => {
@@ -1808,6 +2283,11 @@ function renderFilters() {
         state.eventStatusFilters = [...EVENT_STATUS_OPTIONS];
       }
       renderFilters();
+      renderView();
+    });
+    document.getElementById("filterEventVisibility")?.addEventListener("click", e => e.stopPropagation());
+    document.getElementById("filterEventVisibility")?.addEventListener("change", e => {
+      state.eventVisibilityFilter = e.target.value;
       renderView();
     });
   } else {
@@ -1847,6 +2327,7 @@ function renderView() {
   });
 
   updateAttendanceNotificationBadge();
+  updateHeaderNotificationBell();
 
   if (btnClearTab) {
     btnClearTab.style.display = "none";
@@ -1990,12 +2471,18 @@ function renderView() {
             t.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate)
               ? t.dueDate.replace(/^(\d{4})-0?(\d{1,2})-0?(\d{1,2})$/, "$1年$2月$3日")
               : t.dueDate || "";
+          const diffDays = t.status !== "完了" && t.dueDate ? getDaysUntilIsoDate(t.dueDate) : null;
+          const isReminderTarget = diffDays !== null && REMINDER_TARGET_DAYS.includes(diffDays);
           return `
-            <article class="list-row item-card-clickable" data-task-row="${escapeHtml(t.sysId)}">
+            <article class="list-row item-card-clickable" data-task-row="${escapeHtml(t.sysId)}" style="${isReminderTarget ? "border-left: 4px solid #dc2626;" : ""}">
               <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 4px;">
                 <div class="task-parallel-row">
                   <span class="task-id-large">${escapeHtml(t.taskId)}</span>
                   <span class="badge task-status-large ${getStatusBadgeClass(t.status)}">${escapeHtml(t.status)}</span>
+                  ${isReminderTarget
+                    ? `<span class="badge" style="background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;">🔔 期日まであと${diffDays}日</span>`
+                    : ""
+                  }
                   <span class="task-name-large">${escapeHtml(t.taskName)}</span>
                 </div>
                 ${hasSubMeta ? `
@@ -2025,20 +2512,30 @@ function renderView() {
     eventsToggleWrap.style.display = "block";
 
     refreshAllEventStatuses(db.events);
+    const isAdmin = isAdminRole(state.userRole);
 
     const filtered = db.events.filter(ev => {
+      if (ev.adminOnly && !isAdmin) return false;
+
+      if (isAdmin) {
+        if (state.eventVisibilityFilter === "PUBLIC" && ev.adminOnly) return false;
+        if (state.eventVisibilityFilter === "ADMIN_ONLY" && !ev.adminOnly) return false;
+      }
+
       const evStatus = getAutoEventStatus(ev);
       const jpDate =
         ev.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(ev.eventDate)
           ? ev.eventDate.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$1年$2月$3日")
           : "";
+      const visibilityLabel = ev.adminOnly ? "運営限定" : "全員公開";
       const matchSearch =
         !q ||
         ev.eventId.toLowerCase().includes(q) ||
         ev.eventName.toLowerCase().includes(q) ||
         (ev.eventDate || "").toLowerCase().includes(q) ||
         jpDate.toLowerCase().includes(q) ||
-        evStatus.toLowerCase().includes(q);
+        evStatus.toLowerCase().includes(q) ||
+        visibilityLabel.toLowerCase().includes(q);
       const matchStatus = state.eventStatusFilters.includes(evStatus);
       return matchSearch && matchStatus;
     });
@@ -2051,18 +2548,33 @@ function renderView() {
       return;
     }
 
+    const renderEventExtraBadges = ev => {
+      const badges = [];
+      if (ev.adminOnly) {
+        badges.push(`<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`);
+      }
+      if (isAdmin && ev.eventDate) {
+        const diff = getDaysUntilIsoDate(ev.eventDate);
+        if (diff !== null && REMINDER_TARGET_DAYS.includes(diff)) {
+          badges.push(`<span class="badge" style="background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;">🔔 ${diff}日後に全体リマインド</span>`);
+        }
+      }
+      return badges.join("");
+    };
+
     if (state.eventsLayout === "deck") {
       contentEl.innerHTML = `
         <div class="card-grid">
           ${filtered.map(ev => {
             const evStatus = getAutoEventStatus(ev);
             return `
-              <article class="item-card item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
+              <article class="item-card item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" style="${ev.adminOnly ? "border-left: 4px solid #d97706;" : ""}" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
                 <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 8px; width: 100%;">
                   <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                    <div style="display: flex; align-items: center; gap: 6px;">
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                       <span class="badge badge-id">${escapeHtml(ev.eventId)}</span>
                       <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
+                      ${renderEventExtraBadges(ev)}
                     </div>
                     <span class="card-chevron" aria-hidden="true">›</span>
                   </div>
@@ -2084,12 +2596,13 @@ function renderView() {
           ${filtered.map(ev => {
             const evStatus = getAutoEventStatus(ev);
             return `
-              <article class="list-row item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
+              <article class="list-row item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" style="${ev.adminOnly ? "border-left: 4px solid #d97706;" : ""}" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
                 <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 8px; width: 100%;">
                   <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                    <div style="display: flex; align-items: center; gap: 6px;">
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                       <span class="badge badge-id">${escapeHtml(ev.eventId)}</span>
                       <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
+                      ${renderEventExtraBadges(ev)}
                     </div>
                     <span class="card-chevron" aria-hidden="true">›</span>
                   </div>
@@ -2220,10 +2733,10 @@ function renderAttendanceView() {
     return;
   }
 
-  const dates = sheet.dates || [];
+  const dates = getVisibleDatesForRole(sheet, state.userRole);
   const responses = sheet.responses || {};
   const myMember = getCurrentLoggedInMember();
-  const isAdmin = ADMIN_ROLES.includes(state.userRole);
+  const isAdmin = isAdminRole(state.userRole);
 
   const answeredCount = db.members.filter(m => isMonthAnsweredByMember(sheet, m.sysId)).length;
   countEl.textContent = `回答 ${answeredCount}/${db.members.length}名`;
@@ -2232,6 +2745,7 @@ function renderAttendanceView() {
   const dateStats = dates.map(d => {
     let ok = 0, maybe = 0, ng = 0;
     db.members.forEach(m => {
+      if (d.adminOnly && !isAdminRole(m.role)) return;
       const mark = responses[m.sysId]?.marks?.[d.dateId];
       if (mark === "◯") ok++;
       else if (mark === "△") maybe++;
@@ -2271,11 +2785,12 @@ function renderAttendanceView() {
         <select id="monthSelect" class="month-select">
           ${monthKeys.map(k => {
             const mSheet = db.monthlySchedules[k];
+            const visibleCount = getVisibleDatesForRole(mSheet, state.userRole).length;
             const isUnanswered = unansweredMonths.includes(k);
-            const statusSuffix = myMember && mSheet.dates.length > 0
+            const statusSuffix = myMember && visibleCount > 0
               ? (isUnanswered ? " 🔴未回答" : " ✓回答済")
               : "";
-            return `<option value="${escapeHtml(k)}" ${k === state.selectedMonth ? "selected" : ""}>${escapeHtml(mSheet.monthLabel)}（${mSheet.dates.length}日程）${statusSuffix}</option>`;
+            return `<option value="${escapeHtml(k)}" ${k === state.selectedMonth ? "selected" : ""}>${escapeHtml(mSheet.monthLabel)}（${visibleCount}日程）${statusSuffix}</option>`;
           }).join("")}
         </select>
         <button type="button" class="btn-icon" id="btnAddMonthQuick" style="font-weight: 700; color: var(--primary-dark); border-color: var(--primary);">
@@ -2324,13 +2839,19 @@ function renderAttendanceView() {
               return `
                 <tr class="${isBest ? "best-date-row" : ""}">
                   <td class="col-date-label">
-                    <div>${isBest ? "★ " : ""}${escapeHtml(d.dateLabel)}</div>
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                      <span>${isBest ? "★ " : ""}${escapeHtml(d.dateLabel)}</span>
+                      ${d.adminOnly ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 0.68rem; padding: 1px 6px;">🔒 運営限定</span>` : ""}
+                    </div>
                     <div style="font-size: 0.75rem; color: var(--text-muted); font-weight: 400;">${escapeHtml(d.title)}</div>
                   </td>
                   <td><span class="count-pill count-ok">${d.ok}</span></td>
                   <td><span class="count-pill count-maybe">${d.maybe}</span></td>
                   <td><span class="count-pill count-ng">${d.ng}</span></td>
                   ${db.members.map(m => {
+                    if (d.adminOnly && !isAdminRole(m.role)) {
+                      return `<td style="background: #f8fafc; color: #cbd5e1; font-size: 0.72rem;" title="運営メンバー限定イベントのため対象外">対象外</td>`;
+                    }
                     const mark = responses[m.sysId]?.marks?.[d.dateId] || "-";
                     const isMe = myMember && m.sysId === myMember.sysId;
                     const canTapCell = isMe || isAdmin;
@@ -2434,7 +2955,8 @@ function generateWeekdayDatesForMonth(year, month, targetDaysOfWeek = [3], defau
         dateId: "d_" + generateUniqueId(),
         isoDate,
         dateLabel: `${month}/${d} (${w}) ${defaultTime}`,
-        title: defaultTitle
+        title: defaultTitle,
+        adminOnly: false
       });
     }
     date.setDate(date.getDate() + 1);
@@ -2705,6 +3227,11 @@ function openEventDetailModal(sysId) {
   const rec = db.events.find(ev => ev.sysId === sysId);
   if (!rec) return;
 
+  if (rec.adminOnly && !isAdminRole(state.userRole)) {
+    alert("このイベントは運営メンバー限定のため閲覧できません。");
+    return;
+  }
+
   state.modalMode = "eventDetail";
   state.editingSysId = sysId;
 
@@ -2728,7 +3255,11 @@ function openEventDetailModal(sysId) {
       const ngMembers = [];
       const unansweredMembers = [];
 
-      db.members.forEach(m => {
+      const targetMembers = rec.adminOnly
+        ? db.members.filter(m => isAdminRole(m.role))
+        : db.members;
+
+      targetMembers.forEach(m => {
         const resp = sheet.responses?.[m.sysId];
         const mark = resp?.marks?.[dateEntry.dateId];
         const comment = resp?.comment ? `（💬 ${resp.comment}）` : "";
@@ -2758,6 +3289,7 @@ function openEventDetailModal(sysId) {
         <div style="display: flex; flex-direction: column; gap: 12px;">
           <div style="font-size: 0.85rem; color: var(--text-muted); font-weight: 600;">
             対象日程: ${escapeHtml(sheet.monthLabel)} ${escapeHtml(dateEntry.dateLabel)}
+            ${rec.adminOnly ? `<span style="color: #92400e; margin-left: 6px;">（🔒 運営メンバーのみ集計）</span>` : ""}
           </div>
 
           <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 12px;">
@@ -2803,9 +3335,13 @@ function openEventDetailModal(sysId) {
     <div class="detail-hero">
       <div class="detail-avatar" style="border-radius: 12px;">📅</div>
       <div>
-        <div style="margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+        <div style="margin-bottom: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
           <span class="badge badge-id">${escapeHtml(rec.eventId)}</span>
           <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
+          ${rec.adminOnly
+            ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`
+            : `<span class="badge" style="background: #e0f2fe; color: #075985;">🌐 全員公開</span>`
+          }
         </div>
         <div style="font-size: 1.2rem; font-weight: 800; color: var(--text-main);">
           ${escapeHtml(rec.eventName)}
@@ -2818,6 +3354,16 @@ function openEventDetailModal(sysId) {
         <div class="detail-label">🆔 イベントID</div>
         <div class="detail-value" style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace;">
           ${escapeHtml(rec.eventId)}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">👁️ 公開範囲（閲覧権限）</div>
+        <div class="detail-value">
+          ${rec.adminOnly
+            ? `<span style="color: #92400e; font-weight: 700;">🔒 運営メンバー限定（代表・副代表・運営メンバー・開発管理者のみ表示）</span>`
+            : `<span style="color: var(--primary-dark); font-weight: 700;">🌐 全メンバー公開（在校生・OB/OGを含む全員に表示）</span>`
+          }
         </div>
       </div>
 
@@ -2905,7 +3451,7 @@ function openAddMonthModal() {
           </label>
         `).join("")}
       </div>
-      <span class="form-hint">※「出欠表を作成する」を押すと、次の画面で自動生成された日程がリスト表示され、チェックボックスで実際に追加する日程を取捨選択できます。</span>
+      <span class="form-hint">※「出欠表を作成する」を押すと、次の画面で自動生成された日程がリスト表示され、各日程の活動名や「🔒 運営限定」の設定も行えます。</span>
     </div>
   `;
 
@@ -2943,7 +3489,7 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
 
       <div class="list-stack" style="margin-top: 6px; gap: 8px;" id="confirmDatesList">
         ${candidateDates.map((d, idx) => `
-          <label class="list-row" style="cursor: pointer; padding: 10px 14px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px;">
+          <div class="list-row" style="padding: 10px 14px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px;">
             <input
               type="checkbox"
               name="confirmMonthDateItem"
@@ -2951,9 +3497,15 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
               checked
               style="width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer; flex-shrink: 0;"
             />
-            <div style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0;">
-              <div style="font-weight: 800; font-size: 0.98rem; color: var(--primary-dark);">
-                ${escapeHtml(d.dateLabel)}
+            <div style="display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0;">
+              <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+                <span style="font-weight: 800; font-size: 0.98rem; color: var(--primary-dark);">
+                  ${escapeHtml(d.dateLabel)}
+                </span>
+                <label style="display: inline-flex; align-items: center; gap: 4px; font-size: 0.76rem; font-weight: 700; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 999px; cursor: pointer;">
+                  <input type="checkbox" data-candidate-admin="${idx}" ${d.adminOnly ? "checked" : ""} style="accent-color: #d97706;" />
+                  <span>🔒 運営限定</span>
+                </label>
               </div>
               <input
                 type="text"
@@ -2964,11 +3516,11 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
                 style="padding: 6px 10px; font-size: 0.85rem;"
               />
             </div>
-          </label>
+          </div>
         `).join("")}
       </div>
       <span class="form-hint" id="confirmDateErrorHint" style="color: var(--danger); display: none; font-weight: 700;">※追加する日程を1つ以上選択してください。</span>
-      <span class="form-hint">※祝日や休講日などのチェックを外すことで除外でき、各日程の活動名もその場で編集できます。</span>
+      <span class="form-hint">※祝日や休講日などのチェックを外すことで除外でき、各日程の活動名や「🔒 運営限定」もその場で設定できます。</span>
     </div>
 
     <div>
@@ -2977,10 +3529,6 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
       </button>
     </div>
   `;
-
-  bodyEl.querySelectorAll("[data-candidate-title]").forEach(input => {
-    input.addEventListener("click", e => e.stopPropagation());
-  });
 
   document.getElementById("btnSelectAllCandidateDates")?.addEventListener("click", () => {
     bodyEl.querySelectorAll('input[name="confirmMonthDateItem"]').forEach(cb => {
@@ -3019,7 +3567,7 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
   }
 
   const myMember = getCurrentLoggedInMember();
-  const isAdmin = ADMIN_ROLES.includes(state.userRole);
+  const isAdmin = isAdminRole(state.userRole);
 
   let assignedMember = null;
   if (targetMemberSysId && isAdmin) {
@@ -3044,6 +3592,7 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
     const existing = sheet.responses[memberObj.sysId] || { marks: {}, comment: "" };
     const isAlreadyAnswered = isMonthAnsweredByMember(sheet, memberObj.sysId);
     const isSelf = myMember && memberObj.sysId === myMember.sysId;
+    const visibleDates = getVisibleDatesForRole(sheet, memberObj.role);
 
     bodyEl.innerHTML = `
       <div class="form-group">
@@ -3078,7 +3627,7 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
 
       <div class="form-group">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
-          <label class="form-label">1. ${escapeHtml(sheet.monthLabel)}の全日程を一括選択</label>
+          <label class="form-label">1. ${escapeHtml(sheet.monthLabel)}の全日程を一括選択（${visibleDates.length}件）</label>
           <div style="display: flex; gap: 4px;">
             <button type="button" class="btn-icon" data-fill-all="◯" style="font-size: 0.75rem; padding: 4px 8px;">すべて◯</button>
             <button type="button" class="btn-icon" data-fill-all="△" style="font-size: 0.75rem; padding: 4px 8px;">すべて△</button>
@@ -3087,12 +3636,15 @@ function openBulkAttendanceModal(targetMemberSysId = null) {
         </div>
 
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 4px;" id="bulkDatesContainer">
-          ${sheet.dates.map(d => {
+          ${visibleDates.map(d => {
             const currentMark = existing.marks[d.dateId] || "◯";
             return `
-              <div class="bulk-date-row" data-date-row="${escapeHtml(d.dateId)}">
+              <div class="bulk-date-row" data-date-row="${escapeHtml(d.dateId)}" style="${d.adminOnly ? "border-left: 3px solid #d97706;" : ""}">
                 <div class="bulk-date-info">
-                  ${escapeHtml(d.dateLabel)}
+                  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                    <span>${escapeHtml(d.dateLabel)}</span>
+                    ${d.adminOnly ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 0.68rem; padding: 1px 6px;">🔒 運営限定</span>` : ""}
+                  </div>
                   <span class="bulk-date-sub">${escapeHtml(d.title)}</span>
                 </div>
                 <div class="mark-Segment" role="group" aria-label="${escapeHtml(d.dateLabel)}の出欠">
@@ -3168,8 +3720,11 @@ function openManageDatesModal() {
       <label class="form-label">現在の候補日一覧（${escapeHtml(sheet.monthLabel)}）</label>
       <div style="display: flex; flex-direction: column; gap: 6px;" id="manageDateList">
         ${sheet.dates.map(d => `
-          <div class="date-manage-item">
-            <span><strong>${escapeHtml(d.dateLabel)}</strong> — ${escapeHtml(d.title)}</span>
+          <div class="date-manage-item" style="${d.adminOnly ? "border-left: 3px solid #d97706;" : ""}">
+            <span>
+              <strong>${escapeHtml(d.dateLabel)}</strong> — ${escapeHtml(d.title)}
+              ${d.adminOnly ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 0.68rem; margin-left: 4px;">🔒 運営限定</span>` : ""}
+            </span>
             <button type="button" class="btn btn-danger" style="padding: 3px 8px; font-size: 0.75rem;" data-del-date="${escapeHtml(d.dateId)}">削除</button>
           </div>
         `).join("")}
@@ -3184,6 +3739,10 @@ function openManageDatesModal() {
         <input type="date" id="newDateIso" class="form-control" value="${escapeHtml(defaultIsoDate)}" />
         <input type="text" id="newDateTitle" class="form-control" placeholder="例: 模擬授業リハーサル" />
       </div>
+      <label class="checkbox-item" style="margin-top: 6px; padding: 8px 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-weight: 700; color: #92400e;">
+        <input type="checkbox" id="newDateAdminOnly" />
+        <span>🔒 運営メンバー限定イベントとして追加する（在校生・OB/OGには非表示）</span>
+      </label>
       <span class="form-hint">※追加した日程は「イベント」タブにも自動的に登録・連携されます。</span>
       <button type="button" class="btn btn-secondary" id="btnAddCandidateDate" style="align-self: flex-start; margin-top: 4px;">
         ＋ 候補日を追加する
@@ -3223,6 +3782,7 @@ function openManageDatesModal() {
   document.getElementById("btnAddCandidateDate").addEventListener("click", () => {
     const isoDate = document.getElementById("newDateIso").value.trim();
     const title = document.getElementById("newDateTitle").value.trim() || "サークル活動";
+    const adminOnly = Boolean(document.getElementById("newDateAdminOnly")?.checked);
     if (!isoDate) return;
 
     const targetYm = isoDate.slice(0, 7);
@@ -3240,7 +3800,8 @@ function openManageDatesModal() {
       dateId: "d_" + generateUniqueId(),
       isoDate,
       dateLabel: formatDateLabelFromIso(isoDate, "17:30〜"),
-      title
+      title,
+      adminOnly
     };
     db.monthlySchedules[targetYm].dates.push(newDateObj);
     syncScheduleDateToEvents(targetYm, newDateObj);
@@ -3266,7 +3827,8 @@ function openManageDatesModal() {
             dateId: "d_" + generateUniqueId(),
             isoDate,
             dateLabel: formatDateLabelFromIso(isoDate, "17:30〜"),
-            title: "定例ミーティング"
+            title: "定例ミーティング",
+            adminOnly: false
           }
         ],
         responses: {}
@@ -3458,7 +4020,7 @@ function openFormModal(sysId = null) {
       <div class="form-group">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <label class="form-label" for="fieldTaskDueYear">
-            期限 <span class="ro-tag">任意（プルダウン選択）</span>
+            期限 <span class="ro-tag">3日前・1日前・当日に運営へプッシュ通知</span>
           </label>
           <button type="button" class="btn-icon" id="btnClearTaskDue" style="padding: 2px 8px; font-size: 0.74rem;">
             期限なしに戻す
@@ -3515,7 +4077,7 @@ function openFormModal(sysId = null) {
     const nextEventId = generateNextEventId(db.events);
     const rec = sysId
       ? db.events.find(ev => ev.sysId === sysId)
-      : { eventId: nextEventId, eventName: "", eventDate: "", status: "開催" };
+      : { eventId: nextEventId, eventName: "", eventDate: "", status: "開催", adminOnly: false };
     const currentStatus = getAutoEventStatus(rec);
 
     titleEl.textContent = sysId ? "イベント企画の編集" : "イベント企画の新規登録";
@@ -3530,12 +4092,12 @@ function openFormModal(sysId = null) {
         <label class="form-label" for="fieldEventName">
           イベント名 <span class="req-tag">必須 (Required)</span>
         </label>
-        <input type="text" id="fieldEventName" class="form-control" required value="${escapeHtml(rec.eventName)}" placeholder="例: 第2回 模擬授業対策会" />
+        <input type="text" id="fieldEventName" class="form-control" required value="${escapeHtml(rec.eventName)}" placeholder="例: 第2回 模擬授業対策会 / 幹部運営ミーティング" />
       </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
         <div class="form-group">
           <label class="form-label" for="fieldEventDate">
-            開催日 <span class="ro-tag">任意 (Date)</span>
+            開催日 <span class="ro-tag">3日前・1日前・当日に通知</span>
           </label>
           <input type="date" id="fieldEventDate" class="form-control" value="${escapeHtml(rec.eventDate || "")}" />
         </div>
@@ -3548,7 +4110,17 @@ function openFormModal(sysId = null) {
           </select>
         </div>
       </div>
-      <span class="form-hint">※開催日を設定すると「出欠調整」タブの該当月の日程にも自動反映され、開催日を過ぎるとステータスが自動で「終了」に切り替わります。</span>
+      <div class="form-group">
+        <label class="form-label">
+          公開範囲（閲覧権限）
+        </label>
+        <label class="checkbox-item" style="padding: 10px 12px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-weight: 700; color: #92400e;">
+          <input type="checkbox" id="fieldEventAdminOnly" ${rec.adminOnly ? "checked" : ""} />
+          <span>🔒 運営メンバー限定にする（代表・副代表・運営メンバー・開発管理者のみ閲覧可能）</span>
+        </label>
+        <span class="form-hint">※チェックを入れると、在校生・OB/OGの「イベント」一覧および「月別出欠調整」には表示されなくなります。</span>
+      </div>
+      <span class="form-hint">※開催日を設定すると「出欠調整」タブの該当月の日程にも自動反映され、3日前・1日前・当日に運営メンバーへリマインド通知されます。</span>
     `;
     document.getElementById("fieldEventDate")?.addEventListener("change", e => {
       const val = e.target.value;
@@ -3642,6 +4214,7 @@ function renderDbTable() {
             <th>イベント名</th>
             <th>開催日</th>
             <th>ステータス</th>
+            <th>公開範囲</th>
           </tr>
         </thead>
         <tbody>
@@ -3654,6 +4227,7 @@ function renderDbTable() {
                 <td>${escapeHtml(ev.eventName)}</td>
                 <td>${escapeHtml(ev.eventDate || "")}</td>
                 <td>${escapeHtml(evStatus)}</td>
+                <td>${ev.adminOnly ? "運営限定" : "全員公開"}</td>
               </tr>
             `;
           }).join("")}
@@ -3671,7 +4245,7 @@ function renderDbTable() {
             <th>対象月</th>
             <th>学籍番号</th>
             <th>氏名</th>
-            ${dates.map(d => `<th>${escapeHtml(d.dateLabel)}</th>`).join("")}
+            ${dates.map(d => `<th>${escapeHtml(d.dateLabel)}${d.adminOnly ? " (運営限定)" : ""}</th>`).join("")}
             <th>コメント</th>
           </tr>
         </thead>
@@ -3683,7 +4257,10 @@ function renderDbTable() {
                 <td>${escapeHtml(mSheet ? mSheet.monthLabel : "")}</td>
                 <td style="font-family: monospace;">${escapeHtml(m.studentId || "")}</td>
                 <td>${escapeHtml(m.name)}</td>
-                ${dates.map(d => `<td>${escapeHtml(resp.marks[d.dateId] || "未回答")}</td>`).join("")}
+                ${dates.map(d => {
+                  if (d.adminOnly && !isAdminRole(m.role)) return `<td>対象外</td>`;
+                  return `<td>${escapeHtml(resp.marks[d.dateId] || "未回答")}</td>`;
+                }).join("")}
                 <td>${escapeHtml(resp.comment || "")}</td>
               </tr>
             `;
@@ -3727,21 +4304,37 @@ function downloadCurrentSheetCsv() {
     filename = "教職の森_運営管理アプリDB_タスク.csv";
   } else if (sheet === "events") {
     refreshAllEventStatuses(db.events);
-    headers = ["システムID", "イベントID", "イベント名", "開催日", "ステータス"];
-    rows = db.events.map(ev => [ev.sysId, ev.eventId, ev.eventName, ev.eventDate || "", getAutoEventStatus(ev)]);
+    headers = ["システムID", "イベントID", "イベント名", "開催日", "ステータス", "公開範囲"];
+    rows = db.events.map(ev => [
+      ev.sysId,
+      ev.eventId,
+      ev.eventName,
+      ev.eventDate || "",
+      getAutoEventStatus(ev),
+      ev.adminOnly ? "運営限定" : "全員公開"
+    ]);
     filename = "教職の森_運営管理アプリDB_イベント.csv";
   } else {
     const mSheet = db.monthlySchedules[state.selectedMonth];
     const dates = mSheet ? mSheet.dates : [];
     const responses = mSheet ? mSheet.responses : {};
-    headers = ["対象月", "学籍番号", "氏名", ...dates.map(d => `${d.dateLabel} ${d.title}`), "コメント"];
+    headers = [
+      "対象月",
+      "学籍番号",
+      "氏名",
+      ...dates.map(d => `${d.dateLabel} ${d.title}${d.adminOnly ? " [運営限定]" : ""}`),
+      "コメント"
+    ];
     rows = db.members.map(m => {
       const resp = responses[m.sysId] || { marks: {}, comment: "" };
       return [
         mSheet ? mSheet.monthLabel : "",
         m.studentId || "",
         m.name,
-        ...dates.map(d => resp.marks[d.dateId] || "未回答"),
+        ...dates.map(d => {
+          if (d.adminOnly && !isAdminRole(m.role)) return "対象外";
+          return resp.marks[d.dateId] || "未回答";
+        }),
         resp.comment || ""
       ];
     });
@@ -3782,7 +4375,6 @@ function closeSyncModal() {
 
 // 初期化処理
 document.addEventListener("DOMContentLoaded", () => {
-  // スマホ画面用の左右スワイプタブ切替を初期化
   initSwipeTabNavigation();
 
   document.querySelectorAll(".preview-mode-btn").forEach(btn => {
@@ -3844,9 +4436,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const sheet = db.monthlySchedules[state.selectedMonth];
       const memberSysId = document.getElementById("bulkMemberSelect").value;
       const comment = document.getElementById("bulkComment").value.trim();
-      const marks = {};
+      const existingMarks = sheet.responses[memberSysId]?.marks || {};
+      const marks = { ...existingMarks };
 
-      sheet.dates.forEach(d => {
+      const memberObj = db.members.find(m => m.sysId === memberSysId);
+      const visibleDates = getVisibleDatesForRole(sheet, memberObj ? memberObj.role : state.userRole);
+
+      visibleDates.forEach(d => {
         const selectedBtn = document.querySelector(
           `.mark-radio-btn.selected[data-date-id="${d.dateId}"]`
         );
@@ -3887,7 +4483,8 @@ document.addEventListener("DOMContentLoaded", () => {
             dateId: "d_" + generateUniqueId(),
             isoDate,
             dateLabel: formatDateLabelFromIso(isoDate, "17:30〜"),
-            title: "定例ミーティング"
+            title: "定例ミーティング",
+            adminOnly: false
           }
         ];
       }
@@ -3917,10 +4514,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const idx = Number(cb.value);
         const orig = pending.candidateDates[idx];
         const titleInput = document.querySelector(`[data-candidate-title="${idx}"]`);
+        const adminCheckbox = document.querySelector(`[data-candidate-admin="${idx}"]`);
         const customTitle = titleInput ? titleInput.value.trim() : "";
         return {
           ...orig,
-          title: customTitle || orig.title || "定例活動・模擬授業会"
+          title: customTitle || orig.title || "定例活動・模擬授業会",
+          adminOnly: Boolean(adminCheckbox?.checked)
         };
       });
 
@@ -3941,7 +4540,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    if (state.modalMode === "manageDates") {
+    if (state.modalMode === "manageDates" || state.modalMode === "notificationsModal") {
       closeFormModal();
       return;
     }
@@ -4051,6 +4650,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const eventName = document.getElementById("fieldEventName").value.trim();
       const eventDate = document.getElementById("fieldEventDate").value.trim();
       const manualStatus = document.getElementById("fieldEventStatus")?.value || "開催";
+      const adminOnly = Boolean(document.getElementById("fieldEventAdminOnly")?.checked);
       if (!eventName) return;
 
       const computedStatus =
@@ -4065,6 +4665,7 @@ document.addEventListener("DOMContentLoaded", () => {
           target.eventName = eventName;
           target.eventDate = eventDate;
           target.status = computedStatus;
+          target.adminOnly = adminOnly;
           syncEventToMonthlySchedule(target, previousDate);
         }
       } else {
@@ -4073,7 +4674,8 @@ document.addEventListener("DOMContentLoaded", () => {
           eventId,
           eventName,
           eventDate,
-          status: computedStatus
+          status: computedStatus,
+          adminOnly
         };
         db.events.push(newEv);
         syncEventToMonthlySchedule(newEv, null);
@@ -4141,6 +4743,7 @@ document.addEventListener("DOMContentLoaded", () => {
         renderFilters();
         renderView();
       }
+      checkAndTriggerAdminPushNotifications(false);
     }
   });
 
@@ -4178,6 +4781,7 @@ document.addEventListener("DOMContentLoaded", () => {
     applyRbacUi(selectedRole);
     renderFilters();
     renderView();
+    checkAndTriggerAdminPushNotifications(false);
   });
 
   const handleAuthButtonClick = () => {
@@ -4197,6 +4801,7 @@ document.addEventListener("DOMContentLoaded", () => {
           applyRbacUi(role);
           renderFilters();
           renderView();
+          checkAndTriggerAdminPushNotifications(false);
         });
       } else if (event === "SIGNED_OUT") {
         state.currentUser = null;
@@ -4206,11 +4811,12 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // 初回起動時にロールとクラウドDBを取得して描画
+  // 初回起動時にロールとクラウドDBを取得して描画＆プッシュ通知チェック
   fetchCurrentUserRole().then(role => {
     applyRbacUi(role);
     renderFilters();
     renderView();
+    checkAndTriggerAdminPushNotifications(false);
     if (db.sheetSyncUrl && hasPermission(state.userRole, "membersTabView")) {
       syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
     }
