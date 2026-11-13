@@ -1,5 +1,5 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + Googleフォーム項目 + 調整さん風「月別・一括出欠登録・途中変更（ログイン自動割当・未回答通知バッジ）」+ 運営限定イベント + タスク/イベント3日前・1日前・当日プッシュ通知 + 左スライドドロワーメニュー + スワイプタブ切替 + Supabase RBAC & クラウドDB永久保存対応)
+// (AppSheet仕様 + 左スライドドロワーメニュー対応 + 出欠ログイン自動割当・未回答通知バッジ + 運営限定イベント + 3日前/1日前/当日プッシュ通知 + スワイプタブ切替 + Supabase RBAC & クラウドDB永久保存対応)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
 const PUSH_NOTIFIED_LOG_KEY = "kyoshoku_no_mori_push_log_v1";
@@ -7,7 +7,7 @@ const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
 
 // GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
-const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "https://script.google.com/macros/s/AKfycbxgZmvJ8dbXt-hFCMYzfuxaxp2OZSyUJQG_jWTwJergMUhPmELv4ID8vH4aN2bthguP/exec";
+const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
 
 // ==========================================================
 // Supabase 接続設定 & RBAC（ロールベースアクセス制御）定義
@@ -116,6 +116,70 @@ function canAssignMemberRole(userRole, targetRole) {
   }
 }
 
+// ==========================================================
+// 左スライドドロワーメニュー（三本線メニュー）の開閉制御
+// ==========================================================
+function openDrawer() {
+  const drawer = document.getElementById("sideDrawer");
+  const backdrop = document.getElementById("drawerBackdrop");
+  updateDrawerUserBox();
+  if (drawer) {
+    drawer.classList.add("open");
+    drawer.setAttribute("aria-hidden", "false");
+  }
+  if (backdrop) {
+    backdrop.classList.add("open");
+    backdrop.setAttribute("aria-hidden", "false");
+  }
+}
+
+function closeDrawer() {
+  const drawer = document.getElementById("sideDrawer");
+  const backdrop = document.getElementById("drawerBackdrop");
+  if (drawer) {
+    drawer.classList.remove("open");
+    drawer.setAttribute("aria-hidden", "true");
+  }
+  if (backdrop) {
+    backdrop.classList.remove("open");
+    backdrop.setAttribute("aria-hidden", "true");
+  }
+}
+
+// ドロワー上部のユーザー情報ボックス（#drawerUserBox）を更新
+function updateDrawerUserBox() {
+  const box = document.getElementById("drawerUserBox");
+  if (!box) return;
+
+  const myMember = getCurrentLoggedInMember();
+  const roleLabel = rbacRoleToLabel(state.userRole);
+  const badgeClass = getRoleBadgeClass(roleLabel);
+
+  if (state.currentUser) {
+    box.innerHTML = `
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
+        <strong style="color: var(--text-main); font-size: 0.9rem;">
+          ${escapeHtml(myMember ? myMember.name : "ログイン中")}
+        </strong>
+        <span class="badge ${badgeClass}">${escapeHtml(roleLabel)}</span>
+      </div>
+      <div style="font-size: 0.75rem; color: var(--text-muted); word-break: break-all;">
+        ${escapeHtml(state.currentUser.email || "")}
+      </div>
+    `;
+  } else {
+    box.innerHTML = `
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <span style="font-weight: 700; color: var(--text-main);">未ログイン</span>
+        <span class="badge ${badgeClass}">${escapeHtml(roleLabel)}</span>
+      </div>
+      <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
+        下のボタンからGoogleログインできます
+      </div>
+    `;
+  }
+}
+
 // Googleログイン実行（Supabase OAuth）
 async function signInWithGoogle() {
   if (!supabaseClient) {
@@ -142,6 +206,7 @@ async function signOutUser() {
   }
   state.currentUser = null;
   state.userRole = "guest";
+  closeDrawer();
   applyRbacUi(state.userRole);
 }
 
@@ -183,19 +248,6 @@ function getCurrentLoggedInMember() {
     return db.members[0];
   }
   return null;
-}
-
-// ==========================================================
-// 左スライドドロワーメニュー（三本線メニュー）の開閉制御
-// ==========================================================
-function openSideDrawer() {
-  document.getElementById("drawerBackdrop")?.classList.add("open");
-  document.getElementById("sideDrawer")?.classList.add("open");
-}
-
-function closeSideDrawer() {
-  document.getElementById("drawerBackdrop")?.classList.remove("open");
-  document.getElementById("sideDrawer")?.classList.remove("open");
 }
 
 // ==========================================================
@@ -285,6 +337,7 @@ function updateAttendanceNotificationBadge() {
 // ==========================================================
 const REMINDER_TARGET_DAYS = [3, 1, 0];
 
+// YYYY-MM-DD と今日（ローカル日付）の差分日数を計算（当日=0, 明日=1, 3日後=3）
 function getDaysUntilIsoDate(isoDate) {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
   const [ty, tm, td] = getTodayIsoString().split("-").map(Number);
@@ -294,6 +347,7 @@ function getDaysUntilIsoDate(isoDate) {
   return Math.round((targetUtc - todayUtc) / (1000 * 60 * 60 * 24));
 }
 
+// 今日時点で通知対象（3日前・1日前・当日）となるタスク＆イベントのリマインド一覧を生成
 function getActiveAdminReminders() {
   if (!isAdminRole(state.userRole)) return [];
 
@@ -355,6 +409,7 @@ function savePushNotifiedLog(logObj) {
   } catch (_) {}
 }
 
+// ブラウザの Web Notifications API でOSのプッシュ通知を送信
 function sendBrowserNativeNotification(reminder) {
   if (!("Notification" in window)) return false;
   if (Notification.permission !== "granted") return false;
@@ -392,6 +447,7 @@ function sendBrowserNativeNotification(reminder) {
   }
 }
 
+// 画面上部にアプリ内プッシュ通知トーストバナーを表示
 function showInAppPushToast(reminders) {
   if (!Array.isArray(reminders) || reminders.length === 0) return;
 
@@ -469,6 +525,7 @@ function showInAppPushToast(reminders) {
   }, 10000);
 }
 
+// 運営メンバーの通知チェック＆未送信分のプッシュ通知発火
 function checkAndTriggerAdminPushNotifications(forceShowToast = false) {
   updateHeaderNotificationBell();
 
@@ -496,7 +553,7 @@ function checkAndTriggerAdminPushNotifications(forceShowToast = false) {
   }
 }
 
-// ドロワー内の「🔔 通知」項目および三本線メニューアイコンのバッジを更新
+// 三本線メニューボタン（#hamburgerNotificationBadge）およびドロワー内「通知」項目（#btnHeaderNotifications / #drawerNotificationBadge）のバッジ更新
 function updateHeaderNotificationBell() {
   const bellBtn = document.getElementById("btnHeaderNotifications");
   const drawerBadge = document.getElementById("drawerNotificationBadge");
@@ -510,32 +567,26 @@ function updateHeaderNotificationBell() {
     return;
   }
 
-  if (bellBtn) bellBtn.style.display = "flex";
-  const reminders = getActiveAdminReminders();
-  const count = reminders.length;
-
-  if (drawerBadge) {
-    if (count > 0) {
-      drawerBadge.textContent = String(count);
-      drawerBadge.style.display = "inline-block";
-    } else {
-      drawerBadge.style.display = "none";
-    }
+  if (bellBtn) {
+    bellBtn.style.display = "flex";
   }
 
+  const reminders = getActiveAdminReminders();
+  const count = reminders.length;
+  const label = count > 9 ? "9+" : String(count);
+
+  if (drawerBadge) {
+    drawerBadge.textContent = label;
+    drawerBadge.style.display = count > 0 ? "inline-block" : "none";
+  }
   if (hamburgerBadge) {
-    if (count > 0) {
-      hamburgerBadge.textContent = count > 9 ? "9+" : String(count);
-      hamburgerBadge.style.display = "inline-block";
-    } else {
-      hamburgerBadge.style.display = "none";
-    }
+    hamburgerBadge.textContent = label;
+    hamburgerBadge.style.display = count > 0 ? "inline-block" : "none";
   }
 }
 
-// 「🔔 通知」を押したときに開く運営メンバー向けリマインド管理モーダル
+// ドロワー内の「🔔 通知」を押したときに開く運営メンバー向けリマインド管理モーダル
 function openNotificationsModal() {
-  closeSideDrawer();
   state.modalMode = "notificationsModal";
   state.editingSysId = null;
   resetFormModalButtons(true);
@@ -739,9 +790,10 @@ function initSwipeTabNavigation() {
         return;
       }
 
+      // モーダルまたは左ドロワーメニューが開いている最中はスワイプによるタブ切替を無効化
       if (
         document.querySelector(".modal-backdrop.open") ||
-        document.getElementById("sideDrawer")?.classList.contains("open")
+        document.querySelector(".side-drawer.open")
       ) {
         ignoreSwipe = true;
         return;
@@ -1132,7 +1184,7 @@ async function syncRoleToSpreadsheet(email, roleLabel) {
   }
 }
 
-// ドロワーメニュー内のユーザー情報・ログイン/ログアウト表示を更新
+// プレビューバーおよび左ドロワーメニュー内のログイン/ログアウト表示更新
 function updateHeaderAuthButtons() {
   const authBtn = document.getElementById("btnGoogleAuth");
   if (authBtn) {
@@ -1141,39 +1193,23 @@ function updateHeaderAuthButtons() {
 
   const headerAuthIcon = document.getElementById("btnHeaderAuthIcon");
   const headerAuthText = document.getElementById("btnHeaderAuthText");
-  const drawerUserBox = document.getElementById("drawerUserBox");
+  const headerAuthBtn = document.getElementById("btnHeaderAuth");
 
-  if (headerAuthIcon && headerAuthText) {
-    if (state.currentUser) {
-      headerAuthIcon.textContent = "🚪";
-      headerAuthText.textContent = "ログアウト";
-    } else {
-      headerAuthIcon.textContent = "🔑";
-      headerAuthText.textContent = "ログイン";
+  if (state.currentUser) {
+    if (headerAuthIcon) headerAuthIcon.textContent = "🚪";
+    if (headerAuthText) headerAuthText.textContent = "ログアウト";
+    if (headerAuthBtn) {
+      headerAuthBtn.title = `ログイン中: ${state.currentUser.email || ""}\nタップしてログアウト`;
+    }
+  } else {
+    if (headerAuthIcon) headerAuthIcon.textContent = "🔑";
+    if (headerAuthText) headerAuthText.textContent = "Googleログイン";
+    if (headerAuthBtn) {
+      headerAuthBtn.title = "Googleアカウントでログイン";
     }
   }
 
-  if (drawerUserBox) {
-    const roleLabel = rbacRoleToLabel(state.userRole);
-    const myMember = getCurrentLoggedInMember();
-    if (state.currentUser) {
-      drawerUserBox.innerHTML = `
-        <div style="font-weight: 800; color: var(--text-main); font-size: 0.88rem;">
-          ${escapeHtml(myMember ? myMember.name : "ログイン中")}
-          <span class="badge ${getRoleBadgeClass(roleLabel)}" style="margin-left: 4px;">${escapeHtml(roleLabel)}</span>
-        </div>
-        <div style="font-size: 0.74rem; color: var(--text-muted); word-break: break-all; margin-top: 2px;">
-          ${escapeHtml(state.currentUser.email || "")}
-        </div>
-      `;
-    } else {
-      drawerUserBox.innerHTML = `
-        <div style="font-weight: 700; color: var(--text-muted);">
-          未ログイン（権限: ${escapeHtml(roleLabel)}）
-        </div>
-      `;
-    }
-  }
+  updateDrawerUserBox();
 }
 
 function applyRbacUi(userRole = state.userRole) {
@@ -1215,7 +1251,7 @@ function applyRbacUi(userRole = state.userRole) {
       visibleTabCount > 0 ? `repeat(${visibleTabCount}, 1fr)` : "1fr";
   }
 
-  // ドロワーメニュー内の各項目の表示/非表示制御
+  // ドロワーメニュー内の「DB・CSV」「フォーム連携」ボタンの表示制御
   const btnOpenDbModal = document.getElementById("btnOpenDbModal");
   const btnDownloadCsv = document.getElementById("btnDownloadCsv");
   const btnOpenSyncModal = document.getElementById("btnOpenSyncModal");
@@ -3008,4 +3044,1862 @@ function openMemberDetailModal(sysId) {
   const rec = db.members.find(m => m.sysId === sysId);
   if (!rec) return;
 
-  state.modal}
+  state.modalMode = "memberDetail";
+  state.editingSysId = sysId;
+
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+
+  resetFormModalButtons(true);
+  btnDelete.style.display = "none";
+  titleEl.textContent = "メンバー詳細";
+
+  const subjectsArr = Array.isArray(rec.subjects) ? rec.subjects : [];
+  const canEditMember = hasPermission(state.userRole, "membersEdit");
+  const canChangeThisMemberRole = canAssignMemberRole(state.userRole, rec.role);
+
+  bodyEl.innerHTML = `
+    <div class="detail-hero">
+      <div class="detail-avatar">${escapeHtml(rec.name.slice(0, 1))}</div>
+      <div>
+        <div style="font-size: 1.15rem; font-weight: 700; color: var(--text-main);">
+          ${escapeHtml(rec.name)}
+        </div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+          <span class="badge ${getRoleBadgeClass(rec.role)}">${escapeHtml(rec.role)}</span>
+          ${rec.discordName ? `<span class="badge badge-discord">💬 ${escapeHtml(rec.discordName)}</span>` : ""}
+        </div>
+      </div>
+    </div>
+
+    ${canEditMember ? `
+      <div class="detail-item" style="background: #f0fdf4; border-color: #bbf7d0;">
+        <div class="detail-label" style="color: #166534;">🔐 役職・Supabase権限の変更</div>
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px;">
+          <select
+            id="quickRoleSelect"
+            class="form-control"
+            style="flex: 1; min-width: 150px; font-weight: 700; background: #fff;"
+            ${!canChangeThisMemberRole ? "disabled title='現在のロールではこの上位役職を変更できません'" : ""}
+          >
+            ${ROLE_OPTIONS.map(r => {
+              const allowed = canAssignMemberRole(state.userRole, r);
+              const isCurrent = rec.role === r;
+              return `<option value="${r}" ${isCurrent ? "selected" : ""} ${!allowed && !isCurrent ? "disabled" : ""}>${r}${!allowed ? "（権限なし）" : ""}</option>`;
+            }).join("")}
+          </select>
+          <button
+            type="button"
+            class="btn btn-primary"
+            id="btnQuickUpdateRole"
+            ${!canChangeThisMemberRole ? "disabled" : ""}
+          >
+            権限を更新する
+          </button>
+        </div>
+        <div style="font-size: 0.74rem; color: #15803d; margin-top: 5px;">
+          ※「権限を更新する」を押すと、メールアドレス（${escapeHtml(rec.email || "未登録")}）をキーにSupabaseの <code>profiles.role</code> も自動変更されます。
+        </div>
+      </div>
+    ` : ""}
+
+    <div class="detail-list">
+      <div class="detail-item">
+        <div class="detail-label">🪪 学籍番号</div>
+        <div class="detail-value" style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace;">
+          ${escapeHtml(rec.studentId || "未設定")}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">🎓 入学年度</div>
+        <div class="detail-value">
+          ${escapeHtml(rec.admissionYear || "未設定")}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📧 メールアドレス</div>
+        <div class="detail-value" style="word-break: break-all;">
+          ${rec.email
+            ? escapeHtml(rec.email)
+            : `<span style="color: var(--text-muted); font-weight: 400;">未登録（右上の「✏️ 編集」からメールアドレスを登録するとSupabase連携が可能です）</span>`
+          }
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📘 希望教科</div>
+        <div class="detail-value">
+          ${subjectsArr.length > 0
+            ? `<div class="subject-list" style="margin-top: 2px;">
+                ${subjectsArr.map(sub => `<span class="badge badge-subject">📘 ${escapeHtml(sub)}</span>`).join("")}
+               </div>`
+            : `<span style="color: var(--text-muted); font-weight: 400;">未設定</span>`
+          }
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">💬 Discordユーザー名</div>
+        <div class="detail-value">
+          ${escapeHtml(rec.discordName || "未設定")}
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("btnQuickUpdateRole")?.addEventListener("click", async () => {
+    const newRoleLabel = document.getElementById("quickRoleSelect")?.value;
+    if (!newRoleLabel || newRoleLabel === rec.role) {
+      alert("現在と同じ役職が選択されています。");
+      return;
+    }
+
+    const btn = document.getElementById("btnQuickUpdateRole");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "更新中...";
+    }
+
+    let result;
+    try {
+      result = await updateMemberRole(rec.email, newRoleLabel, { previousRole: rec.role });
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "権限を更新する";
+      }
+    }
+
+    if (!result.ok) {
+      if (result.reason === "no_email") {
+        if (!confirm("メールアドレスが未登録のためSupabaseのロールは更新できませんが、アプリ内の名簿の役職のみ変更しますか？")) {
+          return;
+        }
+      } else {
+        return;
+      }
+    }
+
+    rec.role = newRoleLabel;
+    saveDb();
+    renderFilters();
+    renderView();
+    openMemberDetailModal(sysId);
+  });
+
+  applyRbacUi(state.userRole);
+  modal.classList.add("open");
+}
+
+function openTaskDetailModal(sysId) {
+  const rec = db.tasks.find(t => t.sysId === sysId);
+  if (!rec) return;
+
+  state.modalMode = "taskDetail";
+  state.editingSysId = sysId;
+
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+
+  resetFormModalButtons(true);
+  btnDelete.style.display = "inline-block";
+  titleEl.textContent = "タスク詳細";
+
+  const formattedDue =
+    rec.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(rec.dueDate)
+      ? formatEventDateHtml(rec.dueDate)
+      : rec.dueDate
+      ? escapeHtml(rec.dueDate)
+      : `<span style="color: var(--text-muted); font-weight: 400;">未設定（期限なし）</span>`;
+
+  bodyEl.innerHTML = `
+    <div class="detail-hero">
+      <div class="detail-avatar" style="border-radius: 12px;">✅</div>
+      <div>
+        <div style="margin-bottom: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+          <span class="badge badge-id">${escapeHtml(rec.taskId)}</span>
+          <span class="badge ${getStatusBadgeClass(rec.status)}">${escapeHtml(rec.status)}</span>
+        </div>
+        <div style="font-size: 1.2rem; font-weight: 800; color: var(--text-main);">
+          ${escapeHtml(rec.taskName)}
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-list">
+      <div class="detail-item">
+        <div class="detail-label">🆔 タスクID</div>
+        <div class="detail-value" style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace;">
+          ${escapeHtml(rec.taskId)}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📊 進捗</div>
+        <div class="detail-value">
+          <span class="badge ${getStatusBadgeClass(rec.status)}" style="font-size: 0.88rem; padding: 4px 12px;">${escapeHtml(rec.status)}</span>
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">👤 担当者（任意）</div>
+        <div class="detail-value">
+          ${rec.assignee
+            ? `<span>👤 ${escapeHtml(rec.assignee)}</span>`
+            : `<span style="color: var(--text-muted); font-weight: 400;">未設定</span>`
+          }
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">⏰ 期限（任意）</div>
+        <div class="detail-value" style="font-size: 1.02rem;">
+          ${formattedDue}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📝 メモ（任意）</div>
+        <div class="detail-value" style="white-space: pre-wrap; font-weight: 500; line-height: 1.55;">
+          ${rec.memo
+            ? escapeHtml(rec.memo)
+            : `<span style="color: var(--text-muted); font-weight: 400;">メモなし</span>`
+          }
+        </div>
+      </div>
+    </div>
+  `;
+
+  applyRbacUi(state.userRole);
+  modal.classList.add("open");
+}
+
+function openEventDetailModal(sysId) {
+  const rec = db.events.find(ev => ev.sysId === sysId);
+  if (!rec) return;
+
+  if (rec.adminOnly && !isAdminRole(state.userRole)) {
+    alert("このイベントは運営メンバー限定のため閲覧できません。");
+    return;
+  }
+
+  state.modalMode = "eventDetail";
+  state.editingSysId = sysId;
+
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+
+  resetFormModalButtons(true);
+  btnDelete.style.display = "none";
+  titleEl.textContent = "イベント詳細";
+
+  let attendanceSummaryHtml = `<span style="color: var(--text-muted); font-weight: 400;">開催日未設定のため出欠表未連携</span>`;
+  if (rec.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(rec.eventDate)) {
+    const ym = rec.eventDate.slice(0, 7);
+    const sheet = db.monthlySchedules[ym];
+    const dateEntry = sheet?.dates?.find(d => d.eventSysId === rec.sysId || d.isoDate === rec.eventDate);
+    if (sheet && dateEntry) {
+      const okMembers = [];
+      const maybeMembers = [];
+      const ngMembers = [];
+      const unansweredMembers = [];
+
+      const targetMembers = rec.adminOnly
+        ? db.members.filter(m => isAdminRole(m.role))
+        : db.members;
+
+      targetMembers.forEach(m => {
+        const resp = sheet.responses?.[m.sysId];
+        const mark = resp?.marks?.[dateEntry.dateId];
+        const comment = resp?.comment ? `（💬 ${resp.comment}）` : "";
+        const item = { name: m.name, role: m.role, comment };
+        if (mark === "◯") okMembers.push(item);
+        else if (mark === "△") maybeMembers.push(item);
+        else if (mark === "✕") ngMembers.push(item);
+        else unansweredMembers.push(item);
+      });
+
+      const renderMemberTags = (list, bgStyle) =>
+        list.length > 0
+          ? `<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;">
+              ${list
+                .map(
+                  m => `
+                    <span class="badge" style="${bgStyle}; font-size: 0.82rem; padding: 4px 10px;">
+                      ${escapeHtml(m.name)}${m.comment ? `<span style="font-weight: 400; font-size: 0.74rem; margin-left: 4px;">${escapeHtml(m.comment)}</span>` : ""}
+                    </span>
+                  `
+                )
+                .join("")}
+            </div>`
+          : `<div style="font-size: 0.8rem; color: var(--text-muted); font-weight: 400; margin-top: 4px;">該当者なし</div>`;
+
+      attendanceSummaryHtml = `
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div style="font-size: 0.85rem; color: var(--text-muted); font-weight: 600;">
+            対象日程: ${escapeHtml(sheet.monthLabel)} ${escapeHtml(dateEntry.dateLabel)}
+            ${rec.adminOnly ? `<span style="color: #92400e; margin-left: 6px;">（🔒 運営メンバーのみ集計）</span>` : ""}
+          </div>
+
+          <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 12px;">
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 0.88rem; font-weight: 700; color: #065f46;">
+              <span class="count-pill count-ok">◯ 出席</span>
+              <span>${okMembers.length}名</span>
+            </div>
+            ${renderMemberTags(okMembers, "background: #ffffff; color: #065f46; border: 1px solid #86efac;")}
+          </div>
+
+          <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 12px;">
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 0.88rem; font-weight: 700; color: #92400e;">
+              <span class="count-pill count-maybe">△ 微妙・調整中</span>
+              <span>${maybeMembers.length}名</span>
+            </div>
+            ${renderMemberTags(maybeMembers, "background: #ffffff; color: #92400e; border: 1px solid #fcd34d;")}
+          </div>
+
+          <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px;">
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 0.88rem; font-weight: 700; color: #991b1b;">
+              <span class="count-pill count-ng">✕ 欠席</span>
+              <span>${ngMembers.length}名</span>
+            </div>
+            ${renderMemberTags(ngMembers, "background: #ffffff; color: #991b1b; border: 1px solid #fca5a5;")}
+          </div>
+
+          ${unansweredMembers.length > 0 ? `
+            <div style="background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;">
+              <div style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted);">
+                未回答（${unansweredMembers.length}名）
+              </div>
+              ${renderMemberTags(unansweredMembers, "background: #ffffff; color: #64748b; border: 1px solid #cbd5e1;")}
+            </div>
+          ` : ""}
+        </div>
+      `;
+    }
+  }
+
+  const evStatus = getAutoEventStatus(rec);
+
+  bodyEl.innerHTML = `
+    <div class="detail-hero">
+      <div class="detail-avatar" style="border-radius: 12px;">📅</div>
+      <div>
+        <div style="margin-bottom: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+          <span class="badge badge-id">${escapeHtml(rec.eventId)}</span>
+          <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
+          ${rec.adminOnly
+            ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`
+            : `<span class="badge" style="background: #e0f2fe; color: #075985;">🌐 全員公開</span>`
+          }
+        </div>
+        <div style="font-size: 1.2rem; font-weight: 800; color: var(--text-main);">
+          ${escapeHtml(rec.eventName)}
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-list">
+      <div class="detail-item">
+        <div class="detail-label">🆔 イベントID</div>
+        <div class="detail-value" style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace;">
+          ${escapeHtml(rec.eventId)}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">👁️ 公開範囲（閲覧権限）</div>
+        <div class="detail-value">
+          ${rec.adminOnly
+            ? `<span style="color: #92400e; font-weight: 700;">🔒 運営メンバー限定（代表・副代表・運営メンバー・開発管理者のみ表示）</span>`
+            : `<span style="color: var(--primary-dark); font-weight: 700;">🌐 全メンバー公開（在校生・OB/OGを含む全員に表示）</span>`
+          }
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📌 ステータス</div>
+        <div class="detail-value">
+          <span class="badge ${getEventStatusBadgeClass(evStatus)}" style="font-size: 0.85rem;">${escapeHtml(evStatus)}</span>
+          <span style="font-size: 0.78rem; color: var(--text-muted); font-weight: 400; margin-left: 6px;">※開催日を過ぎると自動で「終了」に切り替わります</span>
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">🗓️ 開催日</div>
+        <div class="detail-value" style="font-size: 1.05rem;">
+          ${formatEventDateHtml(rec.eventDate)}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📊 出欠調整の状況</div>
+        <div class="detail-value">
+          ${attendanceSummaryHtml}
+        </div>
+      </div>
+    </div>
+  `;
+
+  applyRbacUi(state.userRole);
+  modal.classList.add("open");
+}
+
+function openAddMonthModal() {
+  state.modalMode = "addMonth";
+  state.pendingAddMonthData = null;
+  resetFormModalButtons(false);
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+  const btnSubmitForm = document.getElementById("btnSubmitForm");
+
+  btnDelete.style.display = "none";
+  if (btnSubmitForm) {
+    btnSubmitForm.textContent = "出欠表を作成する";
+    btnSubmitForm.style.padding = "12px 24px";
+    btnSubmitForm.style.fontSize = "1rem";
+  }
+  titleEl.textContent = "📅 新しい対象月（出欠表）の追加";
+
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth() + 1;
+  const years = [2026, 2027, 2028, 2029, 2030];
+  const months = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+  const weekdayOptions = [
+    { val: 1, label: "毎週月曜日（17:30〜）", defaultChecked: true },
+    { val: 2, label: "毎週火曜日（17:30〜）", defaultChecked: false },
+    { val: 3, label: "毎週水曜日（17:30〜）", defaultChecked: true },
+    { val: 4, label: "毎週木曜日（17:30〜）", defaultChecked: false },
+    { val: 5, label: "毎週金曜日（17:30〜）", defaultChecked: false },
+    { val: 6, label: "毎週土曜日（17:30〜）", defaultChecked: false },
+    { val: 0, label: "毎週日曜日（17:30〜）", defaultChecked: false }
+  ];
+
+  bodyEl.innerHTML = `
+    <div class="form-group">
+      <label class="form-label">1. 追加する「年・月」を選択</label>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <select id="addMonthYear" class="form-control" style="font-weight: 700;">
+          ${years.map(y => `<option value="${y}" ${y === curY ? "selected" : ""}>${y}年</option>`).join("")}
+        </select>
+        <select id="addMonthNum" class="form-control" style="font-weight: 700;">
+          ${months.map(m => `<option value="${m}" ${m === curM ? "selected" : ""}>${m}月</option>`).join("")}
+        </select>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">2. 初期候補日の自動作成オプション（複数選択可・17:30〜）</label>
+      <div class="checkbox-grid" id="addMonthWeekdaysGroup">
+        ${weekdayOptions.map(w => `
+          <label class="checkbox-item">
+            <input type="checkbox" name="addMonthWeekdays" value="${w.val}" ${w.defaultChecked ? "checked" : ""} />
+            <span>${w.label}</span>
+          </label>
+        `).join("")}
+      </div>
+      <span class="form-hint">※「出欠表を作成する」を押すと、次の画面で自動生成された日程がリスト表示され、各日程の活動名や「🔒 運営限定」の設定も行えます。</span>
+    </div>
+  `;
+
+  modal.classList.add("open");
+}
+
+function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
+  state.modalMode = "confirmMonthDates";
+  state.pendingAddMonthData = { y, m, ym, candidateDates };
+  resetFormModalButtons(false);
+
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+  const btnSubmitForm = document.getElementById("btnSubmitForm");
+
+  btnDelete.style.display = "none";
+  if (btnSubmitForm) {
+    btnSubmitForm.textContent = "選択した日程で追加する";
+    btnSubmitForm.style.padding = "12px 24px";
+    btnSubmitForm.style.fontSize = "1rem";
+  }
+  titleEl.textContent = `📅 ${y}年${m}月 追加する日程の選択`;
+
+  bodyEl.innerHTML = `
+    <div class="form-group">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+        <label class="form-label">実際に追加する日程にチェックを入れてください（${candidateDates.length}件）</label>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="btn-icon" id="btnSelectAllCandidateDates" style="font-size: 0.75rem; padding: 4px 8px;">すべて選択</button>
+          <button type="button" class="btn-icon" id="btnDeselectAllCandidateDates" style="font-size: 0.75rem; padding: 4px 8px;">全解除</button>
+        </div>
+      </div>
+
+      <div class="list-stack" style="margin-top: 6px; gap: 8px;" id="confirmDatesList">
+        ${candidateDates.map((d, idx) => `
+          <div class="list-row" style="padding: 10px 14px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px;">
+            <input
+              type="checkbox"
+              name="confirmMonthDateItem"
+              value="${idx}"
+              checked
+              style="width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer; flex-shrink: 0;"
+            />
+            <div style="display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0;">
+              <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+                <span style="font-weight: 800; font-size: 0.98rem; color: var(--primary-dark);">
+                  ${escapeHtml(d.dateLabel)}
+                </span>
+                <label style="display: inline-flex; align-items: center; gap: 4px; font-size: 0.76rem; font-weight: 700; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 999px; cursor: pointer;">
+                  <input type="checkbox" data-candidate-admin="${idx}" ${d.adminOnly ? "checked" : ""} style="accent-color: #d97706;" />
+                  <span>🔒 運営限定</span>
+                </label>
+              </div>
+              <input
+                type="text"
+                class="form-control"
+                data-candidate-title="${idx}"
+                value="${escapeHtml(d.title)}"
+                placeholder="活動内容・イベント名"
+                style="padding: 6px 10px; font-size: 0.85rem;"
+              />
+            </div>
+          </div>
+        `).join("")}
+      </div>
+      <span class="form-hint" id="confirmDateErrorHint" style="color: var(--danger); display: none; font-weight: 700;">※追加する日程を1つ以上選択してください。</span>
+      <span class="form-hint">※祝日や休講日などのチェックを外すことで除外でき、各日程の活動名や「🔒 運営限定」もその場で設定できます。</span>
+    </div>
+
+    <div>
+      <button type="button" class="btn btn-secondary" id="btnBackToAddMonthStep1" style="font-size: 0.82rem; padding: 6px 12px;">
+        ← 年月・曜日の選択に戻る
+      </button>
+    </div>
+  `;
+
+  document.getElementById("btnSelectAllCandidateDates")?.addEventListener("click", () => {
+    bodyEl.querySelectorAll('input[name="confirmMonthDateItem"]').forEach(cb => {
+      cb.checked = true;
+    });
+  });
+
+  document.getElementById("btnDeselectAllCandidateDates")?.addEventListener("click", () => {
+    bodyEl.querySelectorAll('input[name="confirmMonthDateItem"]').forEach(cb => {
+      cb.checked = false;
+    });
+  });
+
+  document.getElementById("btnBackToAddMonthStep1")?.addEventListener("click", () => {
+    openAddMonthModal();
+  });
+
+  modal.classList.add("open");
+}
+
+// ==========================================================
+// 出欠の一括登録・変更モーダル（ログイン情報から自分を自動割り当て）
+// ==========================================================
+function openBulkAttendanceModal(targetMemberSysId = null) {
+  state.modalMode = "bulkAttendance";
+  resetFormModalButtons(false);
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+
+  const sheet = db.monthlySchedules[state.selectedMonth];
+  if (!sheet) {
+    alert("先に対象月（出欠表）を作成してください。");
+    return;
+  }
+
+  const myMember = getCurrentLoggedInMember();
+  const isAdmin = isAdminRole(state.userRole);
+
+  let assignedMember = null;
+  if (targetMemberSysId && isAdmin) {
+    assignedMember = db.members.find(m => m.sysId === targetMemberSysId) || myMember;
+  } else {
+    assignedMember = myMember || (targetMemberSysId ? db.members.find(m => m.sysId === targetMemberSysId) : null);
+  }
+
+  if (!assignedMember) {
+    alert(
+      `現在ログイン中のメールアドレス（${state.currentUser?.email || "未ログイン"}）に一致するメンバーが名簿に見つかりません。\n` +
+        "Googleフォームからメンバー登録を行うか、管理者にメールアドレスの登録を依頼してください。"
+    );
+    return;
+  }
+
+  btnDelete.style.display = "none";
+  titleEl.textContent = `🗓️ ${sheet.monthLabel} 出欠の一括登録・変更`;
+
+  function renderBulkFormForMember(memberSysId) {
+    const memberObj = db.members.find(m => m.sysId === memberSysId) || assignedMember;
+    const existing = sheet.responses[memberObj.sysId] || { marks: {}, comment: "" };
+    const isAlreadyAnswered = isMonthAnsweredByMember(sheet, memberObj.sysId);
+    const isSelf = myMember && memberObj.sysId === myMember.sysId;
+    const visibleDates = getVisibleDatesForRole(sheet, memberObj.role);
+
+    bodyEl.innerHTML = `
+      <div class="form-group">
+        <label class="form-label">
+          👤 出欠を登録するメンバー <span class="ro-tag" style="background: #dcfce7; color: #166534;">ログイン情報から自動割当</span>
+        </label>
+        <input type="hidden" id="bulkMemberSelect" value="${escapeHtml(memberObj.sysId)}" />
+        <div class="detail-item" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #f0fdf4; border-color: #bbf7d0; padding: 12px 14px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div class="avatar" style="width: 38px; height: 38px; font-size: 0.95rem; background: #fff;">
+              ${escapeHtml(memberObj.name.slice(0, 1))}
+            </div>
+            <div>
+              <div style="font-size: 1rem; font-weight: 800; color: var(--primary-dark);">
+                ${escapeHtml(memberObj.name)} ${isSelf ? `<span style="font-size: 0.78rem; color: #15803d;">（あなた）</span>` : ""}
+              </div>
+              <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 2px;">
+                ${escapeHtml(memberObj.studentId ? `学籍番号: ${memberObj.studentId} / ` : "")}${escapeHtml(memberObj.role)}
+              </div>
+            </div>
+          </div>
+          <span class="badge ${isAlreadyAnswered ? "event-status-active" : "status-not-started"}">
+            ${isAlreadyAnswered ? "✓ 回答済・変更可" : "🔴 未回答（新規）"}
+          </span>
+        </div>
+        <span class="form-hint" style="color: ${isAlreadyAnswered ? "var(--primary)" : "var(--text-muted)"}; font-weight: 600;">
+          ${isAlreadyAnswered
+            ? "🔄 登録済みの出欠データを読み込みました。変更したい日程をタップして上書き保存できます。"
+            : "✨ 各日程の「◯ / △ / ✕」を選択して保存してください。"}
+        </span>
+      </div>
+
+      <div class="form-group">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+          <label class="form-label">1. ${escapeHtml(sheet.monthLabel)}の全日程を一括選択（${visibleDates.length}件）</label>
+          <div style="display: flex; gap: 4px;">
+            <button type="button" class="btn-icon" data-fill-all="◯" style="font-size: 0.75rem; padding: 4px 8px;">すべて◯</button>
+            <button type="button" class="btn-icon" data-fill-all="△" style="font-size: 0.75rem; padding: 4px 8px;">すべて△</button>
+            <button type="button" class="btn-icon" data-fill-all="✕" style="font-size: 0.75rem; padding: 4px 8px;">すべて✕</button>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 4px;" id="bulkDatesContainer">
+          ${visibleDates.map(d => {
+            const currentMark = existing.marks[d.dateId] || "◯";
+            return `
+              <div class="bulk-date-row" data-date-row="${escapeHtml(d.dateId)}" style="${d.adminOnly ? "border-left: 3px solid #d97706;" : ""}">
+                <div class="bulk-date-info">
+                  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                    <span>${escapeHtml(d.dateLabel)}</span>
+                    ${d.adminOnly ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 0.68rem; padding: 1px 6px;">🔒 運営限定</span>` : ""}
+                  </div>
+                  <span class="bulk-date-sub">${escapeHtml(d.title)}</span>
+                </div>
+                <div class="mark-Segment" role="group" aria-label="${escapeHtml(d.dateLabel)}の出欠">
+                  ${MARK_OPTIONS.map(mk => `
+                    <button
+                      type="button"
+                      class="mark-radio-btn ${currentMark === mk ? "selected" : ""}"
+                      data-date-id="${escapeHtml(d.dateId)}"
+                      data-val="${mk}"
+                    >${mk}</button>
+                  `).join("")}
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="bulkComment">
+          2. ひとことコメント（遅刻・早退の連絡など）
+        </label>
+        <input
+          type="text"
+          id="bulkComment"
+          class="form-control"
+          value="${escapeHtml(existing.comment || "")}"
+          placeholder="例: 授業のため18:00頃から参加します"
+        />
+      </div>
+    `;
+
+    bodyEl.querySelectorAll(".mark-radio-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const dId = btn.dataset.dateId;
+        bodyEl.querySelectorAll(`.mark-radio-btn[data-date-id="${dId}"]`).forEach(b => {
+          b.classList.toggle("selected", b === btn);
+        });
+      });
+    });
+
+    bodyEl.querySelectorAll("[data-fill-all]").forEach(fillBtn => {
+      fillBtn.addEventListener("click", () => {
+        const targetVal = fillBtn.dataset.fillAll;
+        bodyEl.querySelectorAll(".mark-radio-btn").forEach(b => {
+          b.classList.toggle("selected", b.dataset.val === targetVal);
+        });
+      });
+    });
+  }
+
+  renderBulkFormForMember(assignedMember.sysId);
+  modal.classList.add("open");
+}
+
+function openManageDatesModal() {
+  state.modalMode = "manageDates";
+  resetFormModalButtons(false);
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+
+  btnDelete.style.display = "none";
+  const sheet = db.monthlySchedules[state.selectedMonth];
+  if (!sheet) return;
+  titleEl.textContent = `⚙️ ${sheet.monthLabel} の候補日管理・新規月作成`;
+
+  const defaultIsoDate = `${state.selectedMonth}-28`;
+
+  bodyEl.innerHTML = `
+    <div class="form-group">
+      <label class="form-label">現在の候補日一覧（${escapeHtml(sheet.monthLabel)}）</label>
+      <div style="display: flex; flex-direction: column; gap: 6px;" id="manageDateList">
+        ${sheet.dates.map(d => `
+          <div class="date-manage-item" style="${d.adminOnly ? "border-left: 3px solid #d97706;" : ""}">
+            <span>
+              <strong>${escapeHtml(d.dateLabel)}</strong> — ${escapeHtml(d.title)}
+              ${d.adminOnly ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 0.68rem; margin-left: 4px;">🔒 運営限定</span>` : ""}
+            </span>
+            <button type="button" class="btn btn-danger" style="padding: 3px 8px; font-size: 0.75rem;" data-del-date="${escapeHtml(d.dateId)}">削除</button>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+
+    <hr style="border: none; border-top: 1px solid var(--border);" />
+
+    <div class="form-group">
+      <label class="form-label">＋ この月に新しい候補日（イベント）を追加</label>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <input type="date" id="newDateIso" class="form-control" value="${escapeHtml(defaultIsoDate)}" />
+        <input type="text" id="newDateTitle" class="form-control" placeholder="例: 模擬授業リハーサル" />
+      </div>
+      <label class="checkbox-item" style="margin-top: 6px; padding: 8px 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-weight: 700; color: #92400e;">
+        <input type="checkbox" id="newDateAdminOnly" />
+        <span>🔒 運営メンバー限定イベントとして追加する（在校生・OB/OGには非表示）</span>
+      </label>
+      <span class="form-hint">※追加した日程は「イベント」タブにも自動的に登録・連携されます。</span>
+      <button type="button" class="btn btn-secondary" id="btnAddCandidateDate" style="align-self: flex-start; margin-top: 4px;">
+        ＋ 候補日を追加する
+      </button>
+    </div>
+
+    <hr style="border: none; border-top: 1px solid var(--border);" />
+
+    <div class="form-group">
+      <label class="form-label">📅 新しい月の出欠表を作成</label>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <input type="month" id="newMonthInput" class="form-control" value="2027-01" style="max-width: 180px;" />
+        <button type="button" class="btn btn-secondary" id="btnCreateNewMonth">新規月シートを作成</button>
+      </div>
+    </div>
+  `;
+
+  bodyEl.querySelectorAll("[data-del-date]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const dId = btn.dataset.delDate;
+      const targetDateObj = sheet.dates.find(d => d.dateId === dId);
+      if (targetDateObj && targetDateObj.eventSysId) {
+        db.events = db.events.filter(ev => ev.sysId !== targetDateObj.eventSysId);
+      }
+      sheet.dates = sheet.dates.filter(d => d.dateId !== dId);
+      if (sheet.responses) {
+        Object.values(sheet.responses).forEach(resp => {
+          if (resp.marks) delete resp.marks[dId];
+        });
+      }
+      saveDb();
+      openManageDatesModal();
+      renderAttendanceView();
+    });
+  });
+
+  document.getElementById("btnAddCandidateDate").addEventListener("click", () => {
+    const isoDate = document.getElementById("newDateIso").value.trim();
+    const title = document.getElementById("newDateTitle").value.trim() || "サークル活動";
+    const adminOnly = Boolean(document.getElementById("newDateAdminOnly")?.checked);
+    if (!isoDate) return;
+
+    const targetYm = isoDate.slice(0, 7);
+    const [y, m] = targetYm.split("-").map(Number);
+    if (!db.monthlySchedules[targetYm]) {
+      db.monthlySchedules[targetYm] = {
+        monthKey: targetYm,
+        monthLabel: `${y}年${m}月`,
+        dates: [],
+        responses: {}
+      };
+    }
+
+    const newDateObj = {
+      dateId: "d_" + generateUniqueId(),
+      isoDate,
+      dateLabel: formatDateLabelFromIso(isoDate, "17:30〜"),
+      title,
+      adminOnly
+    };
+    db.monthlySchedules[targetYm].dates.push(newDateObj);
+    syncScheduleDateToEvents(targetYm, newDateObj);
+    sortSheetDates(db.monthlySchedules[targetYm]);
+
+    state.selectedMonth = targetYm;
+    saveDb();
+    openManageDatesModal();
+    renderAttendanceView();
+  });
+
+  document.getElementById("btnCreateNewMonth").addEventListener("click", () => {
+    const ym = document.getElementById("newMonthInput").value;
+    if (!ym) return;
+    if (!db.monthlySchedules[ym]) {
+      const [y, m] = ym.split("-");
+      const isoDate = `${ym}-10`;
+      db.monthlySchedules[ym] = {
+        monthKey: ym,
+        monthLabel: `${y}年${Number(m)}月`,
+        dates: [
+          {
+            dateId: "d_" + generateUniqueId(),
+            isoDate,
+            dateLabel: formatDateLabelFromIso(isoDate, "17:30〜"),
+            title: "定例ミーティング",
+            adminOnly: false
+          }
+        ],
+        responses: {}
+      };
+      syncMonthScheduleAndEvents(ym);
+    }
+    state.selectedMonth = ym;
+    saveDb();
+    closeFormModal();
+    renderAttendanceView();
+  });
+
+  modal.classList.add("open");
+}
+
+function openFormModal(sysId = null) {
+  if (state.currentView === "attendance") {
+    openBulkAttendanceModal(null);
+    return;
+  }
+
+  state.modalMode = "record";
+  state.editingSysId = sysId;
+  resetFormModalButtons(false);
+  const modal = document.getElementById("formModal");
+  const titleEl = document.getElementById("formModalTitle");
+  const bodyEl = document.getElementById("formModalBody");
+  const btnDelete = document.getElementById("btnDeleteRecord");
+
+  btnDelete.style.display = sysId ? "inline-block" : "none";
+
+  if (state.currentView === "members") {
+    const rec = sysId
+      ? db.members.find(m => m.sysId === sysId)
+      : {
+          studentId: "",
+          name: "",
+          email: "",
+          role: "在校生",
+          admissionYear: "2026年度",
+          discordName: "",
+          subjects: []
+        };
+    const selectedSubjects = Array.isArray(rec.subjects) ? rec.subjects : [];
+
+    titleEl.textContent = sysId ? "メンバー情報の更新" : "メンバー登録（Googleフォーム準拠）";
+    bodyEl.innerHTML = `
+      <details class="privacy-box">
+        <summary>【個人情報の取り扱いについて】（流通経済大学「教職の森」メンバー登録フォームより）</summary>
+        <p style="margin-top: 6px;">
+          ご記入いただく個人情報（氏名・学籍番号・希望教科など）は、「教職の森」における以下の活動および手続きのために収集いたします。<br>
+          ・交流会、模擬授業会をはじめとするサークル諸活動の運営<br>
+          ・活動の出欠確認および連絡 / メンバー名簿の管理<br>
+          ・学内手続き・施設利用申請に伴う書類作成
+        </p>
+      </details>
+
+      <div class="form-group">
+        <label class="form-label" for="fieldStudentId">
+          学籍番号 <span class="req-tag">必須 (Required)</span>
+        </label>
+        <input type="text" id="fieldStudentId" class="form-control" required value="${escapeHtml(rec.studentId || "")}" placeholder="例: 2601001" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="fieldName">
+          氏名（名前） <span class="req-tag">必須 (Required)</span>
+        </label>
+        <input type="text" id="fieldName" class="form-control" required value="${escapeHtml(rec.name)}" placeholder="（例）流経 太郎" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="fieldEmail">
+          メールアドレス <span class="ro-tag">Googleログイン照合・権限更新に使用</span>
+        </label>
+        <input type="email" id="fieldEmail" class="form-control" value="${escapeHtml(rec.email || "")}" placeholder="例: ryukei.taro@example.com" />
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <div class="form-group">
+          <label class="form-label" for="fieldYear">
+            入学年度 <span class="req-tag">必須</span>
+          </label>
+          <select id="fieldYear" class="form-control" required>
+            ${YEAR_OPTIONS.map(y => `<option value="${y}" ${rec.admissionYear === y ? "selected" : ""}>${y}</option>`).join("")}
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="fieldRole">
+            役職 <span class="ro-tag">変更するとSupabaseの権限も自動更新</span>
+          </label>
+          <select id="fieldRole" class="form-control" ${!canAssignMemberRole(state.userRole, rec.role) ? "disabled title='現在のロールではこの上位役職を変更できません'" : ""}>
+            ${ROLE_OPTIONS.map(r => {
+              const allowed = canAssignMemberRole(state.userRole, r);
+              const isCurrent = rec.role === r;
+              return `<option value="${r}" ${isCurrent ? "selected" : ""} ${!allowed && !isCurrent ? "disabled" : ""}>${r}${!allowed ? "（変更権限なし）" : ""}</option>`;
+            }).join("")}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="fieldDiscord">
+          Discordユーザー名 <span class="req-tag">必須 (Required)</span>
+        </label>
+        <input type="text" id="fieldDiscord" class="form-control" required value="${escapeHtml(rec.discordName || "")}" placeholder="例: ryukei_taro" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">
+          希望教科 <span class="req-tag">必須・複数選択可 (EnumList)</span>
+        </label>
+        <div class="checkbox-grid" id="fieldSubjectsGroup">
+          ${SUBJECT_OPTIONS.map(sub => `
+            <label class="checkbox-item">
+              <input
+                type="checkbox"
+                name="fieldSubjects"
+                value="${escapeHtml(sub)}"
+                ${selectedSubjects.includes(sub) ? "checked" : ""}
+              />
+              <span>${escapeHtml(sub)}</span>
+            </label>
+          `).join("")}
+        </div>
+        <span class="form-hint" id="subjectErrorHint" style="color: var(--danger); display: none;">※希望教科を1つ以上選択してください。</span>
+      </div>
+
+      <p class="form-hint">※「システムID」は自動付与され、SHOW? = false のため画面上には表示されません。</p>
+    `;
+  } else if (state.currentView === "tasks") {
+    const nextTaskId = generateNextTaskId(db.tasks);
+    const rec = sysId
+      ? db.tasks.find(t => t.sysId === sysId)
+      : { taskId: nextTaskId, taskName: "", status: "未着手", assignee: "", dueDate: "", memo: "" };
+
+    const memberNames = Array.from(new Set(db.members.map(m => m.name).filter(Boolean)));
+    if (rec.assignee && !memberNames.includes(rec.assignee)) {
+      memberNames.unshift(rec.assignee);
+    }
+
+    let dueY = "";
+    let dueM = "";
+    let dueD = "";
+    if (rec.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(rec.dueDate)) {
+      const parts = rec.dueDate.split("-");
+      dueY = String(Number(parts[0]));
+      dueM = String(Number(parts[1]));
+      dueD = String(Number(parts[2]));
+    }
+    const years = [2026, 2027, 2028, 2029, 2030];
+    const months = Array.from({ length: 12 }, (_, i) => i + 1);
+    const days = Array.from({ length: 31 }, (_, i) => i + 1);
+
+    titleEl.textContent = sysId ? "タスクの編集" : "タスクの新規登録";
+    bodyEl.innerHTML = `
+      <div class="form-group">
+        <label class="form-label" for="fieldTaskId">
+          タスクID <span class="ro-tag">自動割り当て</span>
+        </label>
+        <input type="text" id="fieldTaskId" class="form-control" readonly value="${escapeHtml(rec.taskId)}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="fieldTaskName">
+          タスク名 <span class="req-tag">必須 (Required)</span>
+        </label>
+        <input type="text" id="fieldTaskName" class="form-control" required value="${escapeHtml(rec.taskName)}" placeholder="例: 新歓ガイダンス資料の印刷" />
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <div class="form-group">
+          <label class="form-label" for="fieldStatus">
+            進捗
+          </label>
+          <select id="fieldStatus" class="form-control">
+            ${STATUS_OPTIONS.map(s => `<option value="${s}" ${rec.status === s ? "selected" : ""}>${s}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="fieldTaskAssignee">
+            担当者 <span class="ro-tag">任意</span>
+          </label>
+          <select id="fieldTaskAssignee" class="form-control">
+            <option value="">未設定（担当者なし）</option>
+            ${memberNames.map(name => `<option value="${escapeHtml(name)}" ${rec.assignee === name ? "selected" : ""}>👤 ${escapeHtml(name)}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <label class="form-label" for="fieldTaskDueYear">
+            期限 <span class="ro-tag">3日前・1日前・当日に運営へプッシュ通知</span>
+          </label>
+          <button type="button" class="btn-icon" id="btnClearTaskDue" style="padding: 2px 8px; font-size: 0.74rem;">
+            期限なしに戻す
+          </button>
+        </div>
+        <div style="display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 8px;">
+          <select id="fieldTaskDueYear" class="form-control" aria-label="期限（年）">
+            <option value="">年（未設定）</option>
+            ${years.map(y => `<option value="${y}" ${String(y) === dueY ? "selected" : ""}>${y}年</option>`).join("")}
+          </select>
+          <select id="fieldTaskDueMonth" class="form-control" aria-label="期限（月）">
+            <option value="">月（未設定）</option>
+            ${months.map(m => `<option value="${m}" ${String(m) === dueM ? "selected" : ""}>${m}月</option>`).join("")}
+          </select>
+          <select id="fieldTaskDueDay" class="form-control" aria-label="期限（日）">
+            <option value="">日（未設定）</option>
+            ${days.map(d => `<option value="${d}" ${String(d) === dueD ? "selected" : ""}>${d}日</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="fieldTaskMemo">
+          メモ <span class="ro-tag">任意</span>
+        </label>
+        <textarea id="fieldTaskMemo" class="form-control" rows="3" placeholder="タスクの詳細・引き継ぎ事項・関連リンクなどを記入（任意）">${escapeHtml(rec.memo || "")}</textarea>
+      </div>
+    `;
+
+    const selY = document.getElementById("fieldTaskDueYear");
+    const selM = document.getElementById("fieldTaskDueMonth");
+    const selD = document.getElementById("fieldTaskDueDay");
+    const syncPullDownDefaults = changedEl => {
+      if (changedEl === selY && !selY.value) {
+        selM.value = "";
+        selD.value = "";
+        return;
+      }
+      if (changedEl.value) {
+        const now = new Date();
+        if (!selY.value) selY.value = String(now.getFullYear());
+        if (!selM.value) selM.value = String(now.getMonth() + 1);
+        if (!selD.value) selD.value = String(now.getDate());
+      }
+    };
+    selY?.addEventListener("change", () => syncPullDownDefaults(selY));
+    selM?.addEventListener("change", () => syncPullDownDefaults(selM));
+    selD?.addEventListener("change", () => syncPullDownDefaults(selD));
+    document.getElementById("btnClearTaskDue")?.addEventListener("click", () => {
+      if (selY) selY.value = "";
+      if (selM) selM.value = "";
+      if (selD) selD.value = "";
+    });
+  } else if (state.currentView === "events") {
+    const nextEventId = generateNextEventId(db.events);
+    const rec = sysId
+      ? db.events.find(ev => ev.sysId === sysId)
+      : { eventId: nextEventId, eventName: "", eventDate: "", status: "開催", adminOnly: false };
+    const currentStatus = getAutoEventStatus(rec);
+
+    titleEl.textContent = sysId ? "イベント企画の編集" : "イベント企画の新規登録";
+    bodyEl.innerHTML = `
+      <div class="form-group">
+        <label class="form-label" for="fieldEventId">
+          イベントID <span class="ro-tag">自動割り当て</span>
+        </label>
+        <input type="text" id="fieldEventId" class="form-control" readonly value="${escapeHtml(rec.eventId)}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="fieldEventName">
+          イベント名 <span class="req-tag">必須 (Required)</span>
+        </label>
+        <input type="text" id="fieldEventName" class="form-control" required value="${escapeHtml(rec.eventName)}" placeholder="例: 第2回 模擬授業対策会 / 幹部運営ミーティング" />
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+        <div class="form-group">
+          <label class="form-label" for="fieldEventDate">
+            開催日 <span class="ro-tag">3日前・1日前・当日に通知</span>
+          </label>
+          <input type="date" id="fieldEventDate" class="form-control" value="${escapeHtml(rec.eventDate || "")}" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="fieldEventStatus">
+            ステータス <span class="ro-tag">日付超過で自動終了</span>
+          </label>
+          <select id="fieldEventStatus" class="form-control">
+            ${EVENT_STATUS_OPTIONS.map(s => `<option value="${s}" ${currentStatus === s ? "selected" : ""}>${s}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">
+          公開範囲（閲覧権限）
+        </label>
+        <label class="checkbox-item" style="padding: 10px 12px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-weight: 700; color: #92400e;">
+          <input type="checkbox" id="fieldEventAdminOnly" ${rec.adminOnly ? "checked" : ""} />
+          <span>🔒 運営メンバー限定にする（代表・副代表・運営メンバー・開発管理者のみ閲覧可能）</span>
+        </label>
+        <span class="form-hint">※チェックを入れると、在校生・OB/OGの「イベント」一覧および「月別出欠調整」には表示されなくなります。</span>
+      </div>
+      <span class="form-hint">※開催日を設定すると「出欠調整」タブの該当月の日程にも自動反映され、3日前・1日前・当日に運営メンバーへリマインド通知されます。</span>
+    `;
+    document.getElementById("fieldEventDate")?.addEventListener("change", e => {
+      const val = e.target.value;
+      const statusSel = document.getElementById("fieldEventStatus");
+      if (val && statusSel) {
+        statusSel.value = val < getTodayIsoString() ? "終了" : "開催";
+      }
+    });
+  }
+
+  modal.classList.add("open");
+}
+
+function closeFormModal() {
+  document.getElementById("formModal").classList.remove("open");
+  state.editingSysId = null;
+}
+
+function renderDbTable() {
+  const container = document.getElementById("dbTableContainer");
+  const sheet = state.activeDbSheet;
+
+  if (sheet === "members") {
+    container.innerHTML = `
+      <table class="db-table">
+        <thead>
+          <tr>
+            <th>システムID <span class="col-hidden-tag">SHOW?=false</span></th>
+            <th>学籍番号</th>
+            <th>氏名（名前）</th>
+            <th>メールアドレス</th>
+            <th>役職</th>
+            <th>入学年度</th>
+            <th>Discordユーザー名</th>
+            <th>希望教科 <span class="col-hidden-tag">EnumList</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${db.members.map(m => `
+            <tr>
+              <td style="font-family: monospace; color: #64748b;">${escapeHtml(m.sysId)}</td>
+              <td style="font-family: monospace;">${escapeHtml(m.studentId || "")}</td>
+              <td>${escapeHtml(m.name)}</td>
+              <td>${escapeHtml(m.email || "")}</td>
+              <td>${escapeHtml(m.role)}</td>
+              <td>${escapeHtml(m.admissionYear)}</td>
+              <td>${escapeHtml(m.discordName || "")}</td>
+              <td>${escapeHtml((m.subjects || []).join(", "))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  } else if (sheet === "tasks") {
+    container.innerHTML = `
+      <table class="db-table">
+        <thead>
+          <tr>
+            <th>システムID <span class="col-hidden-tag">SHOW?=false</span></th>
+            <th>タスクID</th>
+            <th>進捗</th>
+            <th>タスク名</th>
+            <th>担当者</th>
+            <th>期限</th>
+            <th>メモ</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${db.tasks.map(t => `
+            <tr>
+              <td style="font-family: monospace; color: #64748b;">${escapeHtml(t.sysId)}</td>
+              <td>${escapeHtml(t.taskId)}</td>
+              <td>${escapeHtml(t.status)}</td>
+              <td>${escapeHtml(t.taskName)}</td>
+              <td>${escapeHtml(t.assignee || "")}</td>
+              <td>${escapeHtml(t.dueDate || "")}</td>
+              <td>${escapeHtml(t.memo || "")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  } else if (sheet === "events") {
+    refreshAllEventStatuses(db.events);
+    container.innerHTML = `
+      <table class="db-table">
+        <thead>
+          <tr>
+            <th>システムID <span class="col-hidden-tag">SHOW?=false</span></th>
+            <th>イベントID</th>
+            <th>イベント名</th>
+            <th>開催日</th>
+            <th>ステータス</th>
+            <th>公開範囲</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${db.events.map(ev => {
+            const evStatus = getAutoEventStatus(ev);
+            return `
+              <tr>
+                <td style="font-family: monospace; color: #64748b;">${escapeHtml(ev.sysId)}</td>
+                <td>${escapeHtml(ev.eventId)}</td>
+                <td>${escapeHtml(ev.eventName)}</td>
+                <td>${escapeHtml(ev.eventDate || "")}</td>
+                <td>${escapeHtml(evStatus)}</td>
+                <td>${ev.adminOnly ? "運営限定" : "全員公開"}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    `;
+  } else if (sheet === "attendance") {
+    const mSheet = db.monthlySchedules[state.selectedMonth];
+    const dates = mSheet ? mSheet.dates : [];
+    const responses = mSheet ? mSheet.responses : {};
+    container.innerHTML = `
+      <table class="db-table">
+        <thead>
+          <tr>
+            <th>対象月</th>
+            <th>学籍番号</th>
+            <th>氏名</th>
+            ${dates.map(d => `<th>${escapeHtml(d.dateLabel)}${d.adminOnly ? " (運営限定)" : ""}</th>`).join("")}
+            <th>コメント</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${db.members.map(m => {
+            const resp = responses[m.sysId] || { marks: {}, comment: "" };
+            return `
+              <tr>
+                <td>${escapeHtml(mSheet ? mSheet.monthLabel : "")}</td>
+                <td style="font-family: monospace;">${escapeHtml(m.studentId || "")}</td>
+                <td>${escapeHtml(m.name)}</td>
+                ${dates.map(d => {
+                  if (d.adminOnly && !isAdminRole(m.role)) return `<td>対象外</td>`;
+                  return `<td>${escapeHtml(resp.marks[d.dateId] || "未回答")}</td>`;
+                }).join("")}
+                <td>${escapeHtml(resp.comment || "")}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+}
+
+function downloadCurrentSheetCsv() {
+  const sheet = state.activeDbSheet;
+  let headers = [];
+  let rows = [];
+  let filename = "";
+
+  if (sheet === "members") {
+    headers = ["システムID", "学籍番号", "氏名", "メールアドレス", "役職", "入学年度", "Discordユーザー名", "希望教科"];
+    rows = db.members.map(m => [
+      m.sysId,
+      m.studentId || "",
+      m.name,
+      m.email || "",
+      m.role,
+      m.admissionYear,
+      m.discordName || "",
+      (m.subjects || []).join(", ")
+    ]);
+    filename = "教職の森_運営管理アプリDB_メンバー.csv";
+  } else if (sheet === "tasks") {
+    headers = ["システムID", "タスクID", "進捗", "タスク名", "担当者", "期限", "メモ"];
+    rows = db.tasks.map(t => [
+      t.sysId,
+      t.taskId,
+      t.status,
+      t.taskName,
+      t.assignee || "",
+      t.dueDate || "",
+      t.memo || ""
+    ]);
+    filename = "教職の森_運営管理アプリDB_タスク.csv";
+  } else if (sheet === "events") {
+    refreshAllEventStatuses(db.events);
+    headers = ["システムID", "イベントID", "イベント名", "開催日", "ステータス", "公開範囲"];
+    rows = db.events.map(ev => [
+      ev.sysId,
+      ev.eventId,
+      ev.eventName,
+      ev.eventDate || "",
+      getAutoEventStatus(ev),
+      ev.adminOnly ? "運営限定" : "全員公開"
+    ]);
+    filename = "教職の森_運営管理アプリDB_イベント.csv";
+  } else {
+    const mSheet = db.monthlySchedules[state.selectedMonth];
+    const dates = mSheet ? mSheet.dates : [];
+    const responses = mSheet ? mSheet.responses : {};
+    headers = [
+      "対象月",
+      "学籍番号",
+      "氏名",
+      ...dates.map(d => `${d.dateLabel} ${d.title}${d.adminOnly ? " [運営限定]" : ""}`),
+      "コメント"
+    ];
+    rows = db.members.map(m => {
+      const resp = responses[m.sysId] || { marks: {}, comment: "" };
+      return [
+        mSheet ? mSheet.monthLabel : "",
+        m.studentId || "",
+        m.name,
+        ...dates.map(d => {
+          if (d.adminOnly && !isAdminRole(m.role)) return "対象外";
+          return resp.marks[d.dateId] || "未回答";
+        }),
+        resp.comment || ""
+      ];
+    });
+    filename = `教職の森_運営管理アプリDB_月別出欠_${state.selectedMonth}.csv`;
+  }
+
+  const csvCell = val => `"${String(val ?? "").replace(/"/g, '""')}"`;
+  const csvContent =
+    "\uFEFF" +
+    [headers.map(csvCell).join(","), ...rows.map(r => r.map(csvCell).join(","))].join("\r\n");
+
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function openSyncModal() {
+  const syncModal = document.getElementById("syncModal");
+  const urlInput = document.getElementById("sheetUrlInput");
+  const statusEl = document.getElementById("syncStatusMsg");
+  if (urlInput) urlInput.value = db.sheetSyncUrl || "";
+  if (statusEl) {
+    statusEl.style.color = "var(--text-muted)";
+    statusEl.textContent = db.lastSyncedAt ? `最終同期日時: ${db.lastSyncedAt}` : "";
+  }
+  syncModal?.classList.add("open");
+}
+
+function closeSyncModal() {
+  document.getElementById("syncModal")?.classList.remove("open");
+}
+
+// 初期化処理
+document.addEventListener("DOMContentLoaded", () => {
+  initSwipeTabNavigation();
+
+  // 三本線（ハンバーガー）ドロワーメニュー開閉イベント
+  document.getElementById("btnOpenDrawer")?.addEventListener("click", openDrawer);
+  document.getElementById("btnCloseDrawer")?.addEventListener("click", closeDrawer);
+  document.getElementById("drawerBackdrop")?.addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      closeDrawer();
+    }
+  });
+
+  // ドロワー内の「🔔 通知」ボタン
+  document.getElementById("btnHeaderNotifications")?.addEventListener("click", () => {
+    closeDrawer();
+    openNotificationsModal();
+  });
+
+  document.querySelectorAll(".preview-mode-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const isMobile = btn.dataset.device === "mobile";
+      document.body.classList.toggle("mobile-preview-mode", isMobile);
+      document.querySelectorAll(".preview-mode-btn").forEach(b => {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+
+  document.querySelectorAll(".nav-item").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.currentView = btn.dataset.view;
+      state.searchQuery = "";
+      document.getElementById("searchInput").value = "";
+      renderFilters();
+      renderView();
+    });
+  });
+
+  document.querySelectorAll("#eventsViewToggleWrap .view-toggle-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.eventsLayout = btn.dataset.layout;
+      document
+        .querySelectorAll("#eventsViewToggleWrap .view-toggle-btn")
+        .forEach(b => b.classList.toggle("active", b.dataset.layout === state.eventsLayout));
+      renderView();
+    });
+  });
+
+  document.getElementById("searchInput").addEventListener("input", e => {
+    state.searchQuery = e.target.value;
+    renderView();
+  });
+
+  document.getElementById("btnAddRecord").addEventListener("click", () => {
+    if (state.currentView === "members") {
+      window.open(GOOGLE_FORM_URL, "_blank", "noopener,noreferrer");
+      return;
+    }
+    openFormModal(null);
+  });
+
+  document.getElementById("btnCloseFormModal").addEventListener("click", closeFormModal);
+  document.getElementById("btnCancelForm").addEventListener("click", closeFormModal);
+
+  document.getElementById("btnSwitchToEdit")?.addEventListener("click", () => {
+    if (state.editingSysId) {
+      openFormModal(state.editingSysId);
+    }
+  });
+
+  document.getElementById("recordForm").addEventListener("submit", async e => {
+    e.preventDefault();
+
+    if (state.modalMode === "bulkAttendance") {
+      const sheet = db.monthlySchedules[state.selectedMonth];
+      const memberSysId = document.getElementById("bulkMemberSelect").value;
+      const comment = document.getElementById("bulkComment").value.trim();
+      const existingMarks = sheet.responses[memberSysId]?.marks || {};
+      const marks = { ...existingMarks };
+
+      const memberObj = db.members.find(m => m.sysId === memberSysId);
+      const visibleDates = getVisibleDatesForRole(sheet, memberObj ? memberObj.role : state.userRole);
+
+      visibleDates.forEach(d => {
+        const selectedBtn = document.querySelector(
+          `.mark-radio-btn.selected[data-date-id="${d.dateId}"]`
+        );
+        marks[d.dateId] = selectedBtn ? selectedBtn.dataset.val : "◯";
+      });
+
+      sheet.responses[memberSysId] = { marks, comment };
+      saveDb();
+      closeFormModal();
+      renderAttendanceView();
+      return;
+    }
+
+    if (state.modalMode === "addMonth") {
+      const y = Number(document.getElementById("addMonthYear").value);
+      const m = Number(document.getElementById("addMonthNum").value);
+      const ym = `${y}-${String(m).padStart(2, "0")}`;
+
+      if (db.monthlySchedules[ym]) {
+        alert(`${y}年${m}月の出欠表はすでに存在します。対象月を切り替えます。`);
+        state.selectedMonth = ym;
+        closeFormModal();
+        renderAttendanceView();
+        return;
+      }
+
+      const selectedDays = Array.from(
+        document.querySelectorAll('input[name="addMonthWeekdays"]:checked')
+      ).map(cb => Number(cb.value));
+
+      let candidateDates = [];
+      if (selectedDays.length > 0) {
+        candidateDates = generateWeekdayDatesForMonth(y, m, selectedDays, "17:30〜");
+      } else {
+        const isoDate = `${ym}-10`;
+        candidateDates = [
+          {
+            dateId: "d_" + generateUniqueId(),
+            isoDate,
+            dateLabel: formatDateLabelFromIso(isoDate, "17:30〜"),
+            title: "定例ミーティング",
+            adminOnly: false
+          }
+        ];
+      }
+
+      openConfirmMonthDatesModal(y, m, ym, candidateDates);
+      return;
+    }
+
+    if (state.modalMode === "confirmMonthDates") {
+      const pending = state.pendingAddMonthData;
+      if (!pending) {
+        closeFormModal();
+        return;
+      }
+
+      const checkedBoxes = Array.from(
+        document.querySelectorAll('input[name="confirmMonthDateItem"]:checked')
+      );
+
+      if (checkedBoxes.length === 0) {
+        const errEl = document.getElementById("confirmDateErrorHint");
+        if (errEl) errEl.style.display = "block";
+        return;
+      }
+
+      const selectedDates = checkedBoxes.map(cb => {
+        const idx = Number(cb.value);
+        const orig = pending.candidateDates[idx];
+        const titleInput = document.querySelector(`[data-candidate-title="${idx}"]`);
+        const adminCheckbox = document.querySelector(`[data-candidate-admin="${idx}"]`);
+        const customTitle = titleInput ? titleInput.value.trim() : "";
+        return {
+          ...orig,
+          title: customTitle || orig.title || "定例活動・模擬授業会",
+          adminOnly: Boolean(adminCheckbox?.checked)
+        };
+      });
+
+      db.monthlySchedules[pending.ym] = {
+        monthKey: pending.ym,
+        monthLabel: `${pending.y}年${pending.m}月`,
+        dates: selectedDates,
+        responses: {}
+      };
+
+      syncMonthScheduleAndEvents(pending.ym);
+
+      state.selectedMonth = pending.ym;
+      state.pendingAddMonthData = null;
+      saveDb();
+      closeFormModal();
+      renderAttendanceView();
+      return;
+    }
+
+    if (state.modalMode === "manageDates" || state.modalMode === "notificationsModal") {
+      closeFormModal();
+      return;
+    }
+
+    const sysId = state.editingSysId;
+
+    if (state.currentView === "members") {
+      const studentId = document.getElementById("fieldStudentId").value.trim();
+      const name = document.getElementById("fieldName").value.trim();
+      const email = normalizeEmail(document.getElementById("fieldEmail")?.value);
+      const role = document.getElementById("fieldRole").value;
+      const admissionYear = document.getElementById("fieldYear").value;
+      const discordName = document.getElementById("fieldDiscord").value.trim();
+      const checkedSubjects = Array.from(
+        document.querySelectorAll('input[name="fieldSubjects"]:checked')
+      ).map(cb => cb.value);
+
+      if (checkedSubjects.length === 0) {
+        const errHint = document.getElementById("subjectErrorHint");
+        if (errHint) errHint.style.display = "block";
+        return;
+      }
+
+      if (!studentId || !name || !discordName) return;
+
+      if (sysId) {
+        const target = db.members.find(m => m.sysId === sysId);
+        if (target) {
+          if (target.role !== role) {
+            const btnSubmit = document.getElementById("btnSubmitForm");
+            if (btnSubmit) btnSubmit.disabled = true;
+            let result;
+            try {
+              result = await updateMemberRole(email || target.email, role, { previousRole: target.role });
+            } finally {
+              if (btnSubmit) btnSubmit.disabled = false;
+            }
+
+            if (!result.ok) {
+              if (result.reason === "no_email") {
+                if (!confirm("Supabaseの権限は更新できませんが、アプリ内の名簿の役職のみ変更しますか？")) return;
+              } else {
+                return;
+              }
+            }
+          }
+
+          target.studentId = studentId;
+          target.name = name;
+          target.email = email;
+          target.role = role;
+          target.admissionYear = admissionYear;
+          target.discordName = discordName;
+          target.subjects = checkedSubjects;
+        }
+      } else {
+        db.members.push({
+          sysId: generateUniqueId(),
+          studentId,
+          name,
+          email,
+          role,
+          admissionYear,
+          discordName,
+          subjects: checkedSubjects
+        });
+      }
+    } else if (state.currentView === "tasks") {
+      const taskId = document.getElementById("fieldTaskId").value;
+      const taskName = document.getElementById("fieldTaskName").value.trim();
+      const status = document.getElementById("fieldStatus").value;
+      const assignee = (document.getElementById("fieldTaskAssignee")?.value || "").trim();
+      const dueY = document.getElementById("fieldTaskDueYear")?.value || "";
+      const dueM = document.getElementById("fieldTaskDueMonth")?.value || "";
+      const dueD = document.getElementById("fieldTaskDueDay")?.value || "";
+      let dueDate = "";
+      if (dueY && dueM && dueD) {
+        const maxDay = new Date(Number(dueY), Number(dueM), 0).getDate();
+        const validDay = Math.min(Number(dueD), maxDay);
+        dueDate = `${dueY}-${String(dueM).padStart(2, "0")}-${String(validDay).padStart(2, "0")}`;
+      }
+      const memo = (document.getElementById("fieldTaskMemo")?.value || "").trim();
+      if (!taskName) return;
+
+      if (sysId) {
+        const target = db.tasks.find(t => t.sysId === sysId);
+        if (target) {
+          target.taskName = taskName;
+          target.status = status;
+          target.assignee = assignee;
+          target.dueDate = dueDate;
+          target.memo = memo;
+        }
+      } else {
+        db.tasks.push({
+          sysId: generateUniqueId(),
+          taskId,
+          taskName,
+          status,
+          assignee,
+          dueDate,
+          memo
+        });
+      }
+    } else if (state.currentView === "events") {
+      const eventId = document.getElementById("fieldEventId").value;
+      const eventName = document.getElementById("fieldEventName").value.trim();
+      const eventDate = document.getElementById("fieldEventDate").value.trim();
+      const manualStatus = document.getElementById("fieldEventStatus")?.value || "開催";
+      const adminOnly = Boolean(document.getElementById("fieldEventAdminOnly")?.checked);
+      if (!eventName) return;
+
+      const computedStatus =
+        eventDate && /^\d{4}-\d{2}-\d{2}$/.test(eventDate) && eventDate < getTodayIsoString()
+          ? "終了"
+          : manualStatus;
+
+      if (sysId) {
+        const target = db.events.find(ev => ev.sysId === sysId);
+        if (target) {
+          const previousDate = target.eventDate || "";
+          target.eventName = eventName;
+          target.eventDate = eventDate;
+          target.status = computedStatus;
+          target.adminOnly = adminOnly;
+          syncEventToMonthlySchedule(target, previousDate);
+        }
+      } else {
+        const newEv = {
+          sysId: "e_" + generateUniqueId(),
+          eventId,
+          eventName,
+          eventDate,
+          status: computedStatus,
+          adminOnly
+        };
+        db.events.push(newEv);
+        syncEventToMonthlySchedule(newEv, null);
+      }
+    }
+
+    saveDb();
+    closeFormModal();
+    renderView();
+  });
+
+  document.getElementById("btnDeleteRecord").addEventListener("click", () => {
+    const sysId = state.editingSysId;
+    if (!sysId) return;
+    if (!confirm("このデータを削除してもよろしいですか？")) return;
+
+    deleteRecordById(state.currentView, sysId);
+    closeFormModal();
+    renderView();
+  });
+
+  // ドロワー内の「🔗 フォーム連携」ボタン
+  document.getElementById("btnOpenSyncModal")?.addEventListener("click", () => {
+    closeDrawer();
+    openSyncModal();
+  });
+  document.getElementById("btnCloseSyncModal")?.addEventListener("click", closeSyncModal);
+  document.getElementById("btnCloseSyncModalFooter")?.addEventListener("click", closeSyncModal);
+
+  document.getElementById("btnSyncFromSheetUrl")?.addEventListener("click", () => {
+    const rawUrl = document.getElementById("sheetUrlInput").value.trim();
+    if (!rawUrl) {
+      alert("GoogleスプレッドシートのURLを入力してください。");
+      return;
+    }
+    syncFromGoogleSheetUrl(rawUrl, false);
+  });
+
+  document.getElementById("btnImportCsvFile")?.addEventListener("click", () => {
+    const fileInput = document.getElementById("csvFileInput");
+    const file = fileInput?.files?.[0];
+    if (!file) {
+      alert("取り込むCSVファイルを選択してください。");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const result = mergeMembersFromCsvText(String(ev.target.result || ""));
+        syncMemberRolesFromSupabase().then(() => {
+          renderFilters();
+          renderView();
+          alert(`CSV取り込み完了！\n新規追加: ${result.addedCount}名 / 更新: ${result.updatedCount}名`);
+          closeSyncModal();
+        });
+      } catch (err) {
+        alert(`CSV取り込みエラー: ${err.message}`);
+      }
+    };
+    reader.readAsText(file, "UTF-8");
+  });
+
+  window.addEventListener("focus", async () => {
+    if (state.currentUser && state.userRole !== "guest") {
+      await loadCloudDb();
+      if (db.sheetSyncUrl && hasPermission(state.userRole, "membersTabView")) {
+        await syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
+      } else {
+        renderFilters();
+        renderView();
+      }
+      checkAndTriggerAdminPushNotifications(false);
+    }
+  });
+
+  // ドロワー内の「📊 DB・CSV」ボタン
+  const dbModal = document.getElementById("dbModal");
+  document.getElementById("btnOpenDbModal")?.addEventListener("click", () => {
+    closeDrawer();
+    state.activeDbSheet = state.currentView;
+    document.querySelectorAll("#dbSheetTabs .view-toggle-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.sheet === state.activeDbSheet);
+    });
+    renderDbTable();
+    dbModal.classList.add("open");
+  });
+
+  document.getElementById("btnCloseDbModal").addEventListener("click", () => {
+    dbModal.classList.remove("open");
+  });
+  document.getElementById("btnCloseDbModalFooter").addEventListener("click", () => {
+    dbModal.classList.remove("open");
+  });
+
+  document.querySelectorAll("#dbSheetTabs .view-toggle-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.activeDbSheet = btn.dataset.sheet;
+      document.querySelectorAll("#dbSheetTabs .view-toggle-btn").forEach(b => {
+        b.classList.toggle("active", b.dataset.sheet === state.activeDbSheet);
+      });
+      renderDbTable();
+    });
+  });
+
+  document.getElementById("btnDownloadCsv").addEventListener("click", downloadCurrentSheetCsv);
+
+  document.getElementById("rbacRoleSwitcher")?.addEventListener("change", e => {
+    const selectedRole = e.target.value;
+    applyRbacUi(selectedRole);
+    renderFilters();
+    renderView();
+    checkAndTriggerAdminPushNotifications(false);
+  });
+
+  // ドロワー内およびプレビューバーのログイン/ログアウトボタン
+  const handleAuthButtonClick = () => {
+    closeDrawer();
+    if (state.currentUser) {
+      if (confirm("ログアウトしますか？")) signOutUser();
+    } else {
+      signInWithGoogle();
+    }
+  };
+  document.getElementById("btnGoogleAuth")?.addEventListener("click", handleAuthButtonClick);
+  document.getElementById("btnHeaderAuth")?.addEventListener("click", handleAuthButtonClick);
+
+  if (supabaseClient) {
+    supabaseClient.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+        fetchCurrentUserRole().then(role => {
+          applyRbacUi(role);
+          renderFilters();
+          renderView();
+          checkAndTriggerAdminPushNotifications(false);
+        });
+      } else if (event === "SIGNED_OUT") {
+        state.currentUser = null;
+        state.userRole = "guest";
+        applyRbacUi("guest");
+      }
+    });
+  }
+
+  // 初回起動時にロールとクラウドDBを取得して描画＆プッシュ通知チェック
+  fetchCurrentUserRole().then(role => {
+    applyRbacUi(role);
+    renderFilters();
+    renderView();
+    checkAndTriggerAdminPushNotifications(false);
+    if (db.sheetSyncUrl && hasPermission(state.userRole, "membersTabView")) {
+      syncFromGoogleSheetUrl(db.sheetSyncUrl, true);
+    }
+  });
+});
