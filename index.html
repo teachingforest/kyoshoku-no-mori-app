@@ -59,24 +59,61 @@
     <!-- Header -->
     <header class="app-header">
       <div class="brand">
+        <button
+          type="button"
+          class="btn-hamburger"
+          id="btnOpenDrawer"
+          aria-label="メニューを開く"
+          title="メニュー"
+        >
+          <span class="hamburger-icon">☰</span>
+          <span class="hamburger-badge" id="hamburgerNotificationBadge" style="display: none;"></span>
+        </button>
         <div class="brand-icon" aria-hidden="true">🌲</div>
         <div>
           <span class="brand-title">教職の森 運営管理アプリ</span>
-          <span class="brand-subtitle">学生団体 幹部・運営メンバー用</span>
         </div>
       </div>
-      <div class="header-actions">
-        <button type="button" class="btn-header" id="btnOpenSyncModal" title="Googleフォームの回答スプレッドシートと連携・同期する">
-          🔗 <span class="btn-header-text">フォーム連携</span>
-        </button>
-        <button type="button" class="btn-header" id="btnOpenDbModal" title="スプレッドシートDB構造の確認・CSV出力">
-          📊 <span class="btn-header-text">DB / CSV</span>
-        </button>
-        <button type="button" class="btn-header" id="btnHeaderAuth" title="Googleアカウントでログイン / ログアウト">
-          🔑 <span class="btn-header-text" id="btnHeaderAuthText">ログイン</span>
-        </button>
-      </div>
     </header>
+
+    <!-- Left Slide-in Drawer Menu -->
+    <div class="drawer-backdrop" id="drawerBackdrop" aria-hidden="true"></div>
+    <aside class="side-drawer" id="sideDrawer" aria-label="メインメニュー" aria-hidden="true">
+      <div class="drawer-header">
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">🌲</div>
+          <span class="brand-title" style="color: var(--primary-dark);">メニュー</span>
+        </div>
+        <button type="button" class="drawer-close" id="btnCloseDrawer" aria-label="メニューを閉じる">×</button>
+      </div>
+
+      <div class="drawer-user-box" id="drawerUserBox"></div>
+
+      <nav class="drawer-nav-list">
+        <button type="button" class="drawer-nav-item" id="btnHeaderNotifications">
+          <span class="drawer-nav-icon">🔔</span>
+          <span class="drawer-nav-text">通知</span>
+          <span class="drawer-nav-badge" id="drawerNotificationBadge" style="display: none;">0</span>
+        </button>
+
+        <button type="button" class="drawer-nav-item" id="btnOpenSyncModal">
+          <span class="drawer-nav-icon">🔗</span>
+          <span class="drawer-nav-text">フォーム連携</span>
+        </button>
+
+        <button type="button" class="drawer-nav-item" id="btnOpenDbModal">
+          <span class="drawer-nav-icon">📊</span>
+          <span class="drawer-nav-text">DB・CSV</span>
+        </button>
+
+        <hr class="drawer-divider" />
+
+        <button type="button" class="drawer-nav-item drawer-nav-auth" id="btnHeaderAuth">
+          <span class="drawer-nav-icon" id="btnHeaderAuthIcon">🚪</span>
+          <span class="drawer-nav-text" id="btnHeaderAuthText">ログアウト</span>
+        </button>
+      </nav>
+    </aside>
 
     <!-- Scrollable App Viewport -->
     <div class="phone-viewport">
@@ -92,7 +129,7 @@
               type="button"
               class="btn btn-danger"
               id="btnClearCurrentTab"
-              style="padding: 5px 10px; font-size: 0.76rem;"
+              style="padding: 5px 10px; font-size: 0.76rem; display: none;"
             >
               🗑️ 全件削除
             </button>
