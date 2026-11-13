@@ -1,12 +1,10 @@
 // 教職の森 運営管理アプリ - フロントエンドロジック
-// (AppSheet仕様 + 左スライドドロワーメニュー対応 + 出欠ログイン自動割当・未回答通知バッジ + 運営限定イベント + 3日前/1日前/当日プッシュ通知 + スワイプタブ切替 + Supabase RBAC & クラウドDB永久保存対応)
+// (AppSheet仕様 + 左ドロワーメニュー + 日付順/ID順ソート + タスク上旬/中旬/下旬対応 + イベント場所選択 + 完了/終了フィルタ初期OFF + 運営限定イベント + プッシュ通知 + Supabase RBAC & クラウドDB対応)
 
 const STORAGE_KEY = "kyoshoku_no_mori_db_v5";
 const PUSH_NOTIFIED_LOG_KEY = "kyoshoku_no_mori_push_log_v1";
 const GOOGLE_FORM_URL = "https://forms.gle/3qK6Dyzrwr1ZJYTh8";
 const DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CKIbToVcACvwItJYisJMtFfS7kYGg_1mH1-mbtqAXiY/edit?usp=sharing";
-
-// GAS（Google Apps Script）Webアプリの URL（スプレッドシートの「役職」列を書き換える Webhook）
 const GAS_ROLE_WEBHOOK_URL = window.GAS_ROLE_WEBHOOK_URL || "";
 
 // ==========================================================
@@ -23,7 +21,6 @@ const supabaseClient =
     ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
 
-// 1. 役職（ロール）の定義（内部ロール値 & 日本語役職名の相互マッピング）
 const RBAC_ROLES = [
   "president",      // 代表
   "vice_president", // 副代表
@@ -31,7 +28,7 @@ const RBAC_ROLES = [
   "student",        // 在校生
   "alumni",         // OB・OG
   "developer",      // 開発管理者
-  "guest"           // 未承認（ログイン直後・名簿照合前の初期値）
+  "guest"           // 未承認
 ];
 
 const RBAC_ROLE_LABELS = {
@@ -44,13 +41,10 @@ const RBAC_ROLE_LABELS = {
   guest: "未承認"
 };
 
-// 幹部・運営メンバー4役職の共通グループ（運営限定イベント閲覧・プッシュ通知の対象グループ）
 const ADMIN_ROLES = ["president", "vice_president", "manager", "developer"];
 
-// 2. 各種権限と役職ごとの権限マトリクス定義
 const RBAC_PERMISSIONS = {
   csvDownload: ["president", "vice_president", "manager", "developer"],
-
   membersTabView: ["president", "vice_president", "manager", "developer"],
   membersCardView: ["president", "vice_president", "manager", "developer"],
   membersSearch: ["president", "vice_president", "manager", "developer"],
@@ -59,20 +53,16 @@ const RBAC_PERMISSIONS = {
   changeRoleToManager: ["president", "vice_president", "developer"],
   changeRoleToVicePresident: ["vice_president", "developer"],
   changeRoleToPresident: ["president", "vice_president", "developer"],
-
   tasksTabView: ["president", "vice_president", "manager", "developer"],
   tasksSearch: ["president", "vice_president", "manager", "developer"],
   tasksEdit: ["president", "vice_president", "manager", "developer"],
-
   eventsTabView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
   eventsCardView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
   eventsSearch: ["president", "vice_president", "manager", "student", "alumni", "developer"],
   eventsEdit: ["president", "vice_president", "manager", "developer"],
-
   attendanceTabView: ["president", "vice_president", "manager", "student", "developer"],
   attendanceInput: ["president", "vice_president", "manager", "student", "developer"],
   attendanceManageDates: ["president", "vice_president", "manager", "developer"],
-
   membersView: ["president", "vice_president", "manager", "developer"],
   tasksAll: ["president", "vice_president", "manager", "developer"],
   eventsView: ["president", "vice_president", "manager", "student", "alumni", "developer"],
@@ -86,14 +76,12 @@ function hasPermission(userRole, permissionKey) {
   return allowed.includes(normalizedRole);
 }
 
-// 指定したロール（内部ロール値または日本語役職名）が運営メンバー（ADMIN_ROLES）かどうかを判定
 function isAdminRole(userRole = state.userRole) {
   const normalizedRole =
     RBAC_ROLES.includes(userRole) ? userRole : mapMemberRoleToRbacRole(userRole);
   return ADMIN_ROLES.includes(normalizedRole);
 }
 
-// 対象月シートの候補日のうち、指定したロールのユーザーが閲覧可能な日程リストを返す
 function getVisibleDatesForRole(sheet, userRole = state.userRole) {
   if (!sheet || !Array.isArray(sheet.dates)) return [];
   const isAdmin = isAdminRole(userRole);
@@ -146,7 +134,6 @@ function closeDrawer() {
   }
 }
 
-// ドロワー上部のユーザー情報ボックス（#drawerUserBox）を更新
 function updateDrawerUserBox() {
   const box = document.getElementById("drawerUserBox");
   if (!box) return;
@@ -180,7 +167,6 @@ function updateDrawerUserBox() {
   }
 }
 
-// Googleログイン実行（Supabase OAuth）
 async function signInWithGoogle() {
   if (!supabaseClient) {
     alert(
@@ -199,7 +185,6 @@ async function signInWithGoogle() {
   }
 }
 
-// ログアウト実行
 async function signOutUser() {
   if (supabaseClient) {
     await supabaseClient.auth.signOut();
@@ -237,7 +222,6 @@ function normalizeEmail(email) {
   return String(email ?? "").trim().toLowerCase();
 }
 
-// ログイン中のユーザー（state.currentUser.email）に対応する名簿メンバー（db.members）を自動取得する関数
 function getCurrentLoggedInMember() {
   const myEmail = normalizeEmail(state.currentUser?.email);
   if (myEmail) {
@@ -337,7 +321,6 @@ function updateAttendanceNotificationBadge() {
 // ==========================================================
 const REMINDER_TARGET_DAYS = [3, 1, 0];
 
-// YYYY-MM-DD と今日（ローカル日付）の差分日数を計算（当日=0, 明日=1, 3日後=3）
 function getDaysUntilIsoDate(isoDate) {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
   const [ty, tm, td] = getTodayIsoString().split("-").map(Number);
@@ -347,14 +330,12 @@ function getDaysUntilIsoDate(isoDate) {
   return Math.round((targetUtc - todayUtc) / (1000 * 60 * 60 * 24));
 }
 
-// 今日時点で通知対象（3日前・1日前・当日）となるタスク＆イベントのリマインド一覧を生成
 function getActiveAdminReminders() {
   if (!isAdminRole(state.userRole)) return [];
 
   const reminders = [];
   const todayIso = getTodayIsoString();
 
-  // 1. タスクの判定（ステータスが「完了」以外 ＆ 期日まであと 3日 / 1日 / 0日）
   (db.tasks || []).forEach(t => {
     if (!t || t.status === "完了" || !t.dueDate) return;
     const diff = getDaysUntilIsoDate(t.dueDate);
@@ -372,7 +353,6 @@ function getActiveAdminReminders() {
     }
   });
 
-  // 2. イベントの判定（開催日まであと 3日 / 1日 / 0日）
   (db.events || []).forEach(ev => {
     if (!ev || !ev.eventDate) return;
     const diff = getDaysUntilIsoDate(ev.eventDate);
@@ -409,7 +389,6 @@ function savePushNotifiedLog(logObj) {
   } catch (_) {}
 }
 
-// ブラウザの Web Notifications API でOSのプッシュ通知を送信
 function sendBrowserNativeNotification(reminder) {
   if (!("Notification" in window)) return false;
   if (Notification.permission !== "granted") return false;
@@ -447,7 +426,6 @@ function sendBrowserNativeNotification(reminder) {
   }
 }
 
-// 画面上部にアプリ内プッシュ通知トーストバナーを表示
 function showInAppPushToast(reminders) {
   if (!Array.isArray(reminders) || reminders.length === 0) return;
 
@@ -525,7 +503,6 @@ function showInAppPushToast(reminders) {
   }, 10000);
 }
 
-// 運営メンバーの通知チェック＆未送信分のプッシュ通知発火
 function checkAndTriggerAdminPushNotifications(forceShowToast = false) {
   updateHeaderNotificationBell();
 
@@ -553,7 +530,6 @@ function checkAndTriggerAdminPushNotifications(forceShowToast = false) {
   }
 }
 
-// 三本線メニューボタン（#hamburgerNotificationBadge）およびドロワー内「通知」項目（#btnHeaderNotifications / #drawerNotificationBadge）のバッジ更新
 function updateHeaderNotificationBell() {
   const bellBtn = document.getElementById("btnHeaderNotifications");
   const drawerBadge = document.getElementById("drawerNotificationBadge");
@@ -585,7 +561,6 @@ function updateHeaderNotificationBell() {
   }
 }
 
-// ドロワー内の「🔔 通知」を押したときに開く運営メンバー向けリマインド管理モーダル
 function openNotificationsModal() {
   state.modalMode = "notificationsModal";
   state.editingSysId = null;
@@ -790,7 +765,6 @@ function initSwipeTabNavigation() {
         return;
       }
 
-      // モーダルまたは左ドロワーメニューが開いている最中はスワイプによるタブ切替を無効化
       if (
         document.querySelector(".modal-backdrop.open") ||
         document.querySelector(".side-drawer.open")
@@ -857,7 +831,7 @@ function initSwipeTabNavigation() {
 }
 
 // ==========================================================
-// Supabase の profiles テーブルのロール情報を名簿（db.members）のカード表示へ紐づけて同期する関数
+// Supabase の profiles テーブルと app_data テーブルのクラウド同期
 // ==========================================================
 async function syncMemberRolesFromSupabase() {
   if (!supabaseClient || !state.currentUser) return false;
@@ -916,9 +890,6 @@ async function syncMemberRolesFromSupabase() {
   }
 }
 
-// ==========================================================
-// Supabase `app_data` テーブルとのクラウド同期（タスク・イベント・出欠データの永久保存）
-// ==========================================================
 async function loadCloudDb() {
   if (!supabaseClient || !state.currentUser || state.userRole === "guest") return false;
 
@@ -930,7 +901,7 @@ async function loadCloudDb() {
       .maybeSingle();
 
     if (error) {
-      console.warn("Supabase app_data 読み込みスキップ（SQL未実行またはRLS制限）:", error.message);
+      console.warn("Supabase app_data 読み込みスキップ:", error.message);
       return false;
     }
 
@@ -1000,7 +971,6 @@ async function saveCloudDb() {
   }
 }
 
-// アプリ起動時（またはログイン時）に profiles テーブルから自分の role を取得する
 async function fetchCurrentUserRole() {
   if (!supabaseClient) {
     return state.userRole || "developer";
@@ -1063,10 +1033,7 @@ async function fetchCurrentUserRole() {
 
     state.userRole = currentRole;
 
-    // 1. Supabaseから共有データ（タスク・イベント・出欠・名簿）を読み込む
     await loadCloudDb();
-
-    // 2. Supabase上のロール情報（開発管理者など）を名簿カード（db.members）の表示に反映
     await syncMemberRolesFromSupabase();
 
     return currentRole;
@@ -1075,10 +1042,6 @@ async function fetchCurrentUserRole() {
     return "guest";
   }
 }
-
-// ==========================================================
-// 管理者による他メンバーの役職（ロール）変更 → Supabase profiles.role へ自動反映
-// ==========================================================
 
 async function updateMemberRole(targetEmail, newRole, options = {}) {
   const { previousRole = null, silent = false } = options;
@@ -1184,7 +1147,6 @@ async function syncRoleToSpreadsheet(email, roleLabel) {
   }
 }
 
-// プレビューバーおよび左ドロワーメニュー内のログイン/ログアウト表示更新
 function updateHeaderAuthButtons() {
   const authBtn = document.getElementById("btnGoogleAuth");
   if (authBtn) {
@@ -1251,7 +1213,6 @@ function applyRbacUi(userRole = state.userRole) {
       visibleTabCount > 0 ? `repeat(${visibleTabCount}, 1fr)` : "1fr";
   }
 
-  // ドロワーメニュー内の「DB・CSV」「フォーム連携」ボタンの表示制御
   const btnOpenDbModal = document.getElementById("btnOpenDbModal");
   const btnDownloadCsv = document.getElementById("btnDownloadCsv");
   const btnOpenSyncModal = document.getElementById("btnOpenSyncModal");
@@ -1509,6 +1470,8 @@ const SUBJECT_OPTIONS = [
 
 const STATUS_OPTIONS = ["未着手", "進行中", "保留", "完了"];
 const EVENT_STATUS_OPTIONS = ["開催", "終了"];
+const EVENT_LOCATION_PRESETS = ["教室", "体育館", "Discord通話", "その他"];
+const TASK_PERIOD_OPTIONS = ["上旬", "中旬", "下旬"];
 const MARK_OPTIONS = ["◯", "△", "✕"];
 
 function getTodayIsoString() {
@@ -1539,11 +1502,6 @@ function generateUniqueId() {
   return Array.from({ length: 8 }, () =>
     Math.floor(Math.random() * 16).toString(16)
   ).join("");
-}
-
-function generateSequentialId(prefix, count) {
-  const numStr = "0000" + (count + 1);
-  return prefix + numStr.slice(-4);
 }
 
 function generateNextTaskId(tasksList = []) {
@@ -1589,6 +1547,98 @@ function formatEventDateHtml(isoDate) {
   return `<span class="date-num">${escapeHtml(y)}</span><span class="date-unit">年</span><span class="date-num">${escapeHtml(m)}</span><span class="date-unit">月</span><span class="date-num">${escapeHtml(d)}</span><span class="date-unit">日</span>`;
 }
 
+// ==========================================================
+// タスク期限（通常日付 / 〇月上旬・中旬・下旬）のフォーマット＆ソート補助関数
+// ==========================================================
+function formatTaskDueText(dueDate) {
+  if (!dueDate) return "";
+  const s = String(dueDate).trim();
+  // YYYY-MM-DD
+  let m = s.match(/^(\d{4})-0?(\d{1,2})-0?(\d{1,2})$/);
+  if (m) return `${m[1]}年${Number(m[2])}月${Number(m[3])}日`;
+  // YYYY-MM-上旬/中旬/下旬
+  m = s.match(/^(\d{4})-0?(\d{1,2})-(上旬|中旬|下旬)$/);
+  if (m) return `${m[1]}年${Number(m[2])}月${m[3]}`;
+  // MM-上旬/中旬/下旬（年なし）
+  m = s.match(/^0?(\d{1,2})-(上旬|中旬|下旬)$/);
+  if (m) return `${Number(m[1])}月${m[2]}`;
+  // YYYY-MM（月のみ）
+  m = s.match(/^(\d{4})-0?(\d{1,2})$/);
+  if (m) return `${m[1]}年${Number(m[2])}月`;
+  return s;
+}
+
+function formatTaskDueHtml(dueDate) {
+  if (!dueDate) {
+    return `<span style="color: var(--text-muted); font-weight: 400;">未設定（期限なし）</span>`;
+  }
+  const s = String(dueDate).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return formatEventDateHtml(s);
+  }
+  let m = s.match(/^(\d{4})-0?(\d{1,2})-(上旬|中旬|下旬)$/);
+  if (m) {
+    return `<span class="date-num">${escapeHtml(m[1])}</span><span class="date-unit">年</span><span class="date-num">${escapeHtml(String(Number(m[2])))}</span><span class="date-unit">月</span><span class="date-num" style="margin-left:2px;">${escapeHtml(m[3])}</span>`;
+  }
+  m = s.match(/^0?(\d{1,2})-(上旬|中旬|下旬)$/);
+  if (m) {
+    return `<span class="date-num">${escapeHtml(String(Number(m[1])))}</span><span class="date-unit">月</span><span class="date-num" style="margin-left:2px;">${escapeHtml(m[2])}</span>`;
+  }
+  return escapeHtml(formatTaskDueText(s));
+}
+
+// タスクの期限文字列を日付順ソート用の比較キー（YYYY-MM-DD相当）に変換（未設定は末尾へ）
+function getTaskDueSortKey(dueDate) {
+  if (!dueDate) return "9999-99-99";
+  const s = String(dueDate).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  const periodDayMap = { "上旬": "05", "中旬": "15", "下旬": "25" };
+  let m = s.match(/^(\d{4})-0?(\d{1,2})-(上旬|中旬|下旬)$/);
+  if (m) {
+    return `${m[1]}-${String(m[2]).padStart(2, "0")}-${periodDayMap[m[3]] || "15"}`;
+  }
+  m = s.match(/^0?(\d{1,2})-(上旬|中旬|下旬)$/);
+  if (m) {
+    const curY = new Date().getFullYear();
+    return `${curY}-${String(m[1]).padStart(2, "0")}-${periodDayMap[m[2]] || "15"}`;
+  }
+  m = s.match(/^(\d{4})-0?(\d{1,2})$/);
+  if (m) {
+    return `${m[1]}-${String(m[2]).padStart(2, "0")}-31`;
+  }
+  return "9999-98-99_" + s;
+}
+
+function getEventDateSortKey(eventDate) {
+  if (!eventDate || !/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) return "9999-99-99";
+  return eventDate;
+}
+
+function sortTasksList(list, sortOrder = "date") {
+  return [...list].sort((a, b) => {
+    if (sortOrder === "id") {
+      return String(a.taskId || "").localeCompare(String(b.taskId || ""), "ja", { numeric: true });
+    }
+    const keyA = getTaskDueSortKey(a.dueDate);
+    const keyB = getTaskDueSortKey(b.dueDate);
+    if (keyA !== keyB) return keyA.localeCompare(keyB);
+    return String(a.taskId || "").localeCompare(String(b.taskId || ""), "ja", { numeric: true });
+  });
+}
+
+function sortEventsList(list, sortOrder = "date") {
+  return [...list].sort((a, b) => {
+    if (sortOrder === "id") {
+      return String(a.eventId || "").localeCompare(String(b.eventId || ""), "ja", { numeric: true });
+    }
+    const keyA = getEventDateSortKey(a.eventDate);
+    const keyB = getEventDateSortKey(b.eventDate);
+    if (keyA !== keyB) return keyA.localeCompare(keyB);
+    return String(a.eventId || "").localeCompare(String(b.eventId || ""), "ja", { numeric: true });
+  });
+}
+
 function inferIsoDateFromLabel(ym, dateLabel) {
   if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return "";
   const [y, m] = ym.split("-").map(Number);
@@ -1628,9 +1678,14 @@ let state = {
   roleFilter: "ALL",
   yearFilter: "ALL",
   subjectFilter: "ALL",
-  statusFilters: [...STATUS_OPTIONS],
-  eventStatusFilters: [...EVENT_STATUS_OPTIONS],
+  // タスクは「完了」ステータスをデフォルトOFF
+  statusFilters: STATUS_OPTIONS.filter(s => s !== "完了"),
+  // イベントは「終了」ステータスをデフォルトOFF
+  eventStatusFilters: EVENT_STATUS_OPTIONS.filter(s => s !== "終了"),
   eventVisibilityFilter: "ALL",
+  // タスク・イベントの並び替え（"date" = 日付順 [デフォルト], "id" = ID順）
+  taskSortOrder: "date",
+  eventSortOrder: "date",
   editingSysId: null,
   modalMode: "record",
   activeDbSheet: "members",
@@ -1673,7 +1728,7 @@ function saveDb() {
 }
 
 // ==========================================================
-// 「イベント」と「出欠調整」の双方向連携ロジック（運営限定フラグ対応）
+// 「イベント」と「出欠調整」の双方向連携ロジック（運営限定・場所対応）
 // ==========================================================
 
 function sortSheetDates(sheet) {
@@ -1807,6 +1862,7 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     eventId: generateNextEventId(targetDb.events),
     eventName: dateObj.title || "サークル活動",
     eventDate: dateObj.isoDate || "",
+    location: dateObj.location || "",
     adminOnly: Boolean(dateObj.adminOnly)
   };
   getAutoEventStatus(newEv);
@@ -1868,6 +1924,7 @@ function reconcileEventsAndSchedules(targetDb = db) {
 
   targetDb.events.forEach(ev => {
     ev.adminOnly = Boolean(ev.adminOnly);
+    if (typeof ev.location !== "string") ev.location = "";
     getAutoEventStatus(ev);
     if (ev.eventDate) {
       syncEventToMonthlySchedule(ev, null, targetDb);
@@ -1878,29 +1935,6 @@ function reconcileEventsAndSchedules(targetDb = db) {
 // ==========================================================
 // Googleフォーム（回答先スプレッドシート / CSV）連携ロジック
 // ==========================================================
-
-function buildCsvExportUrl(rawUrl) {
-  const trimmed = (rawUrl || "").trim();
-  if (!trimmed) return "";
-
-  if (trimmed.includes("output=csv") || trimmed.includes("format=csv") || trimmed.includes("tqx=out:csv")) {
-    return trimmed;
-  }
-
-  if (trimmed.includes("/spreadsheets/d/e/") && trimmed.includes("/pub")) {
-    return trimmed.replace(/\/pubhtml.*$/, "/pub?output=csv").replace(/\/pub(\?.*)?$/, "/pub?output=csv");
-  }
-
-  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  if (match) {
-    const sheetId = match[1];
-    const gidMatch = trimmed.match(/[#&?]gid=([0-9]+)/);
-    const gidParam = gidMatch ? `&gid=${gidMatch[1]}` : "";
-    return `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv${gidParam}`;
-  }
-
-  return trimmed;
-}
 
 function parseCsvText(text) {
   const rows = [];
@@ -2216,7 +2250,9 @@ function escapeHtml(str) {
     .replace(/'/g, "&#39;");
 }
 
-// フィルタバー描画
+// ==========================================================
+// フィルタバー＆並び替えUIの描画
+// ==========================================================
 function renderFilters() {
   const toolbar = document.querySelector(".toolbar-controls");
   const container = document.getElementById("dynamicFilters");
@@ -2264,7 +2300,7 @@ function renderFilters() {
     const allChecked = state.statusFilters.length === STATUS_OPTIONS.length;
     container.innerHTML = `
       <div class="multi-filter-group" role="group" aria-label="進捗で絞り込み（複数選択可）">
-        <span class="multi-filter-label">進捗（複数選択可）:</span>
+        <span class="multi-filter-label">進捗:</span>
         ${STATUS_OPTIONS.map(s => {
           const isChecked = state.statusFilters.includes(s);
           return `
@@ -2278,6 +2314,10 @@ function renderFilters() {
           ${allChecked ? "全解除" : "すべて選択"}
         </button>
       </div>
+      <select id="sortTaskOrder" class="sort-select" aria-label="タスクの並び替え" style="margin-left: auto;">
+        <option value="date" ${state.taskSortOrder === "date" ? "selected" : ""}>🔃 並び替え: 📅 日付順</option>
+        <option value="id" ${state.taskSortOrder === "id" ? "selected" : ""}>🔃 並び替え: 🆔 ID順</option>
+      </select>
     `;
     container.querySelectorAll('input[name="taskStatusFilter"]').forEach(cb => {
       cb.addEventListener("change", () => {
@@ -2295,6 +2335,10 @@ function renderFilters() {
         state.statusFilters = [...STATUS_OPTIONS];
       }
       renderFilters();
+      renderView();
+    });
+    document.getElementById("sortTaskOrder")?.addEventListener("change", e => {
+      state.taskSortOrder = e.target.value;
       renderView();
     });
   } else if (state.currentView === "events") {
@@ -2316,13 +2360,19 @@ function renderFilters() {
           ${allChecked ? "全解除" : "すべて選択"}
         </button>
       </div>
-      ${isAdmin ? `
-        <select id="filterEventVisibility" class="filter-select" aria-label="公開範囲で絞り込み" style="margin-left: auto;">
-          <option value="ALL" ${state.eventVisibilityFilter === "ALL" ? "selected" : ""}>公開範囲: すべて</option>
-          <option value="PUBLIC" ${state.eventVisibilityFilter === "PUBLIC" ? "selected" : ""}>🌐 全員公開のみ</option>
-          <option value="ADMIN_ONLY" ${state.eventVisibilityFilter === "ADMIN_ONLY" ? "selected" : ""}>🔒 運営限定のみ</option>
+      <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;">
+        ${isAdmin ? `
+          <select id="filterEventVisibility" class="filter-select" aria-label="公開範囲で絞り込み">
+            <option value="ALL" ${state.eventVisibilityFilter === "ALL" ? "selected" : ""}>公開範囲: すべて</option>
+            <option value="PUBLIC" ${state.eventVisibilityFilter === "PUBLIC" ? "selected" : ""}>🌐 全員公開のみ</option>
+            <option value="ADMIN_ONLY" ${state.eventVisibilityFilter === "ADMIN_ONLY" ? "selected" : ""}>🔒 運営限定のみ</option>
+          </select>
+        ` : ""}
+        <select id="sortEventOrder" class="sort-select" aria-label="イベントの並び替え">
+          <option value="date" ${state.eventSortOrder === "date" ? "selected" : ""}>🔃 並び替え: 📅 日付順</option>
+          <option value="id" ${state.eventSortOrder === "id" ? "selected" : ""}>🔃 並び替え: 🆔 ID順</option>
         </select>
-      ` : ""}
+      </div>
     `;
     container.querySelectorAll('input[name="eventStatusFilter"]').forEach(cb => {
       cb.addEventListener("change", () => {
@@ -2347,6 +2397,11 @@ function renderFilters() {
       state.eventVisibilityFilter = e.target.value;
       renderView();
     });
+    document.getElementById("sortEventOrder")?.addEventListener("click", e => e.stopPropagation());
+    document.getElementById("sortEventOrder")?.addEventListener("change", e => {
+      state.eventSortOrder = e.target.value;
+      renderView();
+    });
   } else {
     container.innerHTML = "";
   }
@@ -2369,7 +2424,9 @@ function deleteRecordById(viewType, sysId) {
   saveDb();
 }
 
+// ==========================================================
 // メインビューの描画
+// ==========================================================
 function renderView() {
   const titleEl = document.getElementById("currentViewTitle");
   const countEl = document.getElementById("currentViewCount");
@@ -2494,11 +2551,8 @@ function renderView() {
     fabLabel.textContent = "タスク追加";
     eventsToggleWrap.style.display = "none";
 
-    const filtered = db.tasks.filter(t => {
-      const jpDue =
-        t.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate)
-          ? t.dueDate.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$1年$2月$3日")
-          : "";
+    const filteredRaw = db.tasks.filter(t => {
+      const jpDue = formatTaskDueText(t.dueDate);
       const matchSearch =
         !q ||
         t.taskId.toLowerCase().includes(q) ||
@@ -2512,10 +2566,11 @@ function renderView() {
       return matchSearch && matchStatus;
     });
 
+    const filtered = sortTasksList(filteredRaw, state.taskSortOrder);
     countEl.textContent = `${filtered.length}件`;
 
     if (filtered.length === 0) {
-      contentEl.innerHTML = `<div class="empty-state">登録されているタスクはありません。右下の「＋ タスク追加」から新しいタスクを登録できます（Supabaseに自動保存されます）。</div>`;
+      contentEl.innerHTML = `<div class="empty-state">表示対象のタスクはありません（「完了」タスクを表示する場合は上部の進捗フィルターで「完了」にチェックを入れてください）。</div>`;
       applyRbacUi(state.userRole);
       return;
     }
@@ -2523,11 +2578,8 @@ function renderView() {
     contentEl.innerHTML = `
       <div class="list-stack">
         ${filtered.map(t => {
-          const hasSubMeta = Boolean(t.assignee || t.dueDate || t.memo);
-          const formattedDue =
-            t.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate)
-              ? t.dueDate.replace(/^(\d{4})-0?(\d{1,2})-0?(\d{1,2})$/, "$1年$2月$3日")
-              : t.dueDate || "";
+          const formattedDue = formatTaskDueText(t.dueDate);
+          const hasSubMeta = Boolean(t.assignee || formattedDue || t.memo);
           const diffDays = t.status !== "完了" && t.dueDate ? getDaysUntilIsoDate(t.dueDate) : null;
           const isReminderTarget = diffDays !== null && REMINDER_TARGET_DAYS.includes(diffDays);
           return `
@@ -2571,7 +2623,7 @@ function renderView() {
     refreshAllEventStatuses(db.events);
     const isAdmin = isAdminRole(state.userRole);
 
-    const filtered = db.events.filter(ev => {
+    const filteredRaw = db.events.filter(ev => {
       if (ev.adminOnly && !isAdmin) return false;
 
       if (isAdmin) {
@@ -2591,22 +2643,27 @@ function renderView() {
         ev.eventName.toLowerCase().includes(q) ||
         (ev.eventDate || "").toLowerCase().includes(q) ||
         jpDate.toLowerCase().includes(q) ||
+        (ev.location || "").toLowerCase().includes(q) ||
         evStatus.toLowerCase().includes(q) ||
         visibilityLabel.toLowerCase().includes(q);
       const matchStatus = state.eventStatusFilters.includes(evStatus);
       return matchSearch && matchStatus;
     });
 
+    const filtered = sortEventsList(filteredRaw, state.eventSortOrder);
     countEl.textContent = `${filtered.length}件`;
 
     if (filtered.length === 0) {
-      contentEl.innerHTML = `<div class="empty-state">登録されているイベント企画はありません。右下の「＋ イベント追加」または「出欠調整」タブからイベントを登録できます（Supabaseに自動保存されます）。</div>`;
+      contentEl.innerHTML = `<div class="empty-state">表示対象のイベント企画はありません（過去の「終了」イベントを表示する場合は上部のステータスで「終了」にチェックを入れてください）。</div>`;
       applyRbacUi(state.userRole);
       return;
     }
 
     const renderEventExtraBadges = ev => {
       const badges = [];
+      if (ev.location) {
+        badges.push(`<span class="badge badge-location">📍 ${escapeHtml(ev.location)}</span>`);
+      }
       if (ev.adminOnly) {
         badges.push(`<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`);
       }
@@ -2746,7 +2803,9 @@ function renderView() {
   applyRbacUi(state.userRole);
 }
 
+// ==========================================================
 // 「月別出欠調整」ビューの描画
+// ==========================================================
 function renderAttendanceView() {
   const titleEl = document.getElementById("currentViewTitle");
   const countEl = document.getElementById("currentViewCount");
@@ -3039,7 +3098,9 @@ function resetFormModalButtons(isDetailMode = false) {
   }
 }
 
-// メンバー詳細モーダルを開く
+// ==========================================================
+// 詳細モーダル（メンバー / タスク / イベント）
+// ==========================================================
 function openMemberDetailModal(sysId) {
   const rec = db.members.find(m => m.sysId === sysId);
   if (!rec) return;
@@ -3211,12 +3272,7 @@ function openTaskDetailModal(sysId) {
   btnDelete.style.display = "inline-block";
   titleEl.textContent = "タスク詳細";
 
-  const formattedDue =
-    rec.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(rec.dueDate)
-      ? formatEventDateHtml(rec.dueDate)
-      : rec.dueDate
-      ? escapeHtml(rec.dueDate)
-      : `<span style="color: var(--text-muted); font-weight: 400;">未設定（期限なし）</span>`;
+  const formattedDue = formatTaskDueHtml(rec.dueDate);
 
   bodyEl.innerHTML = `
     <div class="detail-hero">
@@ -3258,7 +3314,7 @@ function openTaskDetailModal(sysId) {
       </div>
 
       <div class="detail-item">
-        <div class="detail-label">⏰ 期限（任意）</div>
+        <div class="detail-label">⏰ 期限（日付 / 上旬・中旬・下旬）</div>
         <div class="detail-value" style="font-size: 1.02rem;">
           ${formattedDue}
         </div>
@@ -3280,6 +3336,7 @@ function openTaskDetailModal(sysId) {
   modal.classList.add("open");
 }
 
+// イベント詳細モーダル（「場所」を追加し、「ステータス」「公開範囲」を「出欠調整の状況」の下へ配置）
 function openEventDetailModal(sysId) {
   const rec = db.events.find(ev => ev.sysId === sysId);
   if (!rec) return;
@@ -3395,6 +3452,7 @@ function openEventDetailModal(sysId) {
         <div style="margin-bottom: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
           <span class="badge badge-id">${escapeHtml(rec.eventId)}</span>
           <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
+          ${rec.location ? `<span class="badge badge-location">📍 ${escapeHtml(rec.location)}</span>` : ""}
           ${rec.adminOnly
             ? `<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`
             : `<span class="badge" style="background: #e0f2fe; color: #075985;">🌐 全員公開</span>`
@@ -3415,12 +3473,26 @@ function openEventDetailModal(sysId) {
       </div>
 
       <div class="detail-item">
-        <div class="detail-label">👁️ 公開範囲（閲覧権限）</div>
+        <div class="detail-label">🗓️ 開催日</div>
+        <div class="detail-value" style="font-size: 1.05rem;">
+          ${formatEventDateHtml(rec.eventDate)}
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📍 場所</div>
         <div class="detail-value">
-          ${rec.adminOnly
-            ? `<span style="color: #92400e; font-weight: 700;">🔒 運営メンバー限定（代表・副代表・運営メンバー・開発管理者のみ表示）</span>`
-            : `<span style="color: var(--primary-dark); font-weight: 700;">🌐 全メンバー公開（在校生・OB/OGを含む全員に表示）</span>`
+          ${rec.location
+            ? `<span class="badge badge-location" style="font-size: 0.9rem; padding: 4px 12px;">📍 ${escapeHtml(rec.location)}</span>`
+            : `<span style="color: var(--text-muted); font-weight: 400;">未設定</span>`
           }
+        </div>
+      </div>
+
+      <div class="detail-item">
+        <div class="detail-label">📊 出欠調整の状況</div>
+        <div class="detail-value">
+          ${attendanceSummaryHtml}
         </div>
       </div>
 
@@ -3433,16 +3505,12 @@ function openEventDetailModal(sysId) {
       </div>
 
       <div class="detail-item">
-        <div class="detail-label">🗓️ 開催日</div>
-        <div class="detail-value" style="font-size: 1.05rem;">
-          ${formatEventDateHtml(rec.eventDate)}
-        </div>
-      </div>
-
-      <div class="detail-item">
-        <div class="detail-label">📊 出欠調整の状況</div>
+        <div class="detail-label">👁️ 公開範囲（閲覧権限）</div>
         <div class="detail-value">
-          ${attendanceSummaryHtml}
+          ${rec.adminOnly
+            ? `<span style="color: #92400e; font-weight: 700;">🔒 運営メンバー限定（代表・副代表・運営メンバー・開発管理者のみ表示）</span>`
+            : `<span style="color: var(--primary-dark); font-weight: 700;">🌐 全メンバー公開（在校生・OB/OGを含む全員に表示）</span>`
+          }
         </div>
       </div>
     </div>
@@ -3606,9 +3674,6 @@ function openConfirmMonthDatesModal(y, m, ym, candidateDates) {
   modal.classList.add("open");
 }
 
-// ==========================================================
-// 出欠の一括登録・変更モーダル（ログイン情報から自分を自動割り当て）
-// ==========================================================
 function openBulkAttendanceModal(targetMemberSysId = null) {
   state.modalMode = "bulkAttendance";
   resetFormModalButtons(false);
@@ -3901,6 +3966,9 @@ function openManageDatesModal() {
   modal.classList.add("open");
 }
 
+// ==========================================================
+// 新規登録・編集モーダル（メンバー / タスク / イベント）
+// ==========================================================
 function openFormModal(sysId = null) {
   if (state.currentView === "attendance") {
     openBulkAttendanceModal(null);
@@ -4028,15 +4096,39 @@ function openFormModal(sysId = null) {
       memberNames.unshift(rec.assignee);
     }
 
+    // 既存の dueDate を「年」「月」「日・時期（上旬/中旬/下旬 or 1〜31）」に分解
     let dueY = "";
     let dueM = "";
     let dueD = "";
-    if (rec.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(rec.dueDate)) {
-      const parts = rec.dueDate.split("-");
-      dueY = String(Number(parts[0]));
-      dueM = String(Number(parts[1]));
-      dueD = String(Number(parts[2]));
+    const rawDue = String(rec.dueDate || "").trim();
+    let mMatch = rawDue.match(/^(\d{4})-0?(\d{1,2})-0?(\d{1,2})$/);
+    if (mMatch) {
+      dueY = String(Number(mMatch[1]));
+      dueM = String(Number(mMatch[2]));
+      dueD = String(Number(mMatch[3]));
+    } else {
+      mMatch = rawDue.match(/^(\d{4})-0?(\d{1,2})-(上旬|中旬|下旬)$/);
+      if (mMatch) {
+        dueY = String(Number(mMatch[1]));
+        dueM = String(Number(mMatch[2]));
+        dueD = mMatch[3];
+      } else {
+        mMatch = rawDue.match(/^0?(\d{1,2})-(上旬|中旬|下旬)$/);
+        if (mMatch) {
+          dueY = "";
+          dueM = String(Number(mMatch[1]));
+          dueD = mMatch[2];
+        } else {
+          mMatch = rawDue.match(/^(\d{4})-0?(\d{1,2})$/);
+          if (mMatch) {
+            dueY = String(Number(mMatch[1]));
+            dueM = String(Number(mMatch[2]));
+            dueD = "";
+          }
+        }
+      }
     }
+
     const years = [2026, 2027, 2028, 2029, 2030];
     const months = Array.from({ length: 12 }, (_, i) => i + 1);
     const days = Array.from({ length: 31 }, (_, i) => i + 1);
@@ -4053,7 +4145,7 @@ function openFormModal(sysId = null) {
         <label class="form-label" for="fieldTaskName">
           タスク名 <span class="req-tag">必須 (Required)</span>
         </label>
-        <input type="text" id="fieldTaskName" class="form-control" required value="${escapeHtml(rec.taskName)}" placeholder="例: 新歓ガイダンス資料の印刷" />
+        <input type="text" id="fieldTaskName" class="form-control" required value="${escapeHtml(rec.taskName)}" placeholder="例: 新歓ガイダンス資料の印刷 / サークル定例会出席" />
       </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
         <div class="form-group">
@@ -4076,27 +4168,33 @@ function openFormModal(sysId = null) {
       </div>
       <div class="form-group">
         <div style="display: flex; justify-content: space-between; align-items: center;">
-          <label class="form-label" for="fieldTaskDueYear">
-            期限 <span class="ro-tag">3日前・1日前・当日に運営へプッシュ通知</span>
+          <label class="form-label" for="fieldTaskDueMonth">
+            期限 <span class="ro-tag">日付 または 〇月上旬・中旬・下旬 を選択可</span>
           </label>
           <button type="button" class="btn-icon" id="btnClearTaskDue" style="padding: 2px 8px; font-size: 0.74rem;">
             期限なしに戻す
           </button>
         </div>
-        <div style="display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 8px;">
+        <div style="display: grid; grid-template-columns: 1.1fr 1fr 1.25fr; gap: 8px;">
           <select id="fieldTaskDueYear" class="form-control" aria-label="期限（年）">
-            <option value="">年（未設定）</option>
+            <option value="">年（指定なし）</option>
             ${years.map(y => `<option value="${y}" ${String(y) === dueY ? "selected" : ""}>${y}年</option>`).join("")}
           </select>
           <select id="fieldTaskDueMonth" class="form-control" aria-label="期限（月）">
             <option value="">月（未設定）</option>
             ${months.map(m => `<option value="${m}" ${String(m) === dueM ? "selected" : ""}>${m}月</option>`).join("")}
           </select>
-          <select id="fieldTaskDueDay" class="form-control" aria-label="期限（日）">
-            <option value="">日（未設定）</option>
-            ${days.map(d => `<option value="${d}" ${String(d) === dueD ? "selected" : ""}>${d}日</option>`).join("")}
+          <select id="fieldTaskDueDay" class="form-control" aria-label="期限（日・上旬/中旬/下旬）">
+            <option value="">日・時期（未設定）</option>
+            <optgroup label="大まかな時期（日付未定）">
+              ${TASK_PERIOD_OPTIONS.map(p => `<option value="${p}" ${dueD === p ? "selected" : ""}>${p}</option>`).join("")}
+            </optgroup>
+            <optgroup label="具体的な日付">
+              ${days.map(d => `<option value="${d}" ${String(d) === dueD ? "selected" : ""}>${d}日</option>`).join("")}
+            </optgroup>
           </select>
         </div>
+        <span class="form-hint">※期日がまだ決まっていない場合は「〇月」＋「<strong>上旬 / 中旬 / 下旬</strong>」を選択できます（具体的な日付を設定した場合は3日前・1日前・当日に通知されます）。</span>
       </div>
       <div class="form-group">
         <label class="form-label" for="fieldTaskMemo">
@@ -4110,16 +4208,15 @@ function openFormModal(sysId = null) {
     const selM = document.getElementById("fieldTaskDueMonth");
     const selD = document.getElementById("fieldTaskDueDay");
     const syncPullDownDefaults = changedEl => {
-      if (changedEl === selY && !selY.value) {
-        selM.value = "";
-        selD.value = "";
-        return;
-      }
-      if (changedEl.value) {
-        const now = new Date();
-        if (!selY.value) selY.value = String(now.getFullYear());
+      const now = new Date();
+      if (changedEl === selD && selD.value) {
         if (!selM.value) selM.value = String(now.getMonth() + 1);
-        if (!selD.value) selD.value = String(now.getDate());
+        // 具体的な日付（1〜31）が選ばれた場合で年が未設定なら今年を自動セット
+        if (!TASK_PERIOD_OPTIONS.includes(selD.value) && !selY.value) {
+          selY.value = String(now.getFullYear());
+        }
+      } else if (changedEl === selM && !selM.value) {
+        selD.value = "";
       }
     };
     selY?.addEventListener("change", () => syncPullDownDefaults(selY));
@@ -4134,8 +4231,18 @@ function openFormModal(sysId = null) {
     const nextEventId = generateNextEventId(db.events);
     const rec = sysId
       ? db.events.find(ev => ev.sysId === sysId)
-      : { eventId: nextEventId, eventName: "", eventDate: "", status: "開催", adminOnly: false };
+      : { eventId: nextEventId, eventName: "", eventDate: "", location: "", status: "開催", adminOnly: false };
     const currentStatus = getAutoEventStatus(rec);
+    const curLoc = String(rec.location || "").trim();
+
+    // 既存の場所文字列からプルダウン初期値を判定
+    let initialPreset = "";
+    if (curLoc) {
+      const matchedPreset = ["教室", "体育館", "Discord通話"].find(
+        p => curLoc === p || curLoc.startsWith(p)
+      );
+      initialPreset = matchedPreset || "その他";
+    }
 
     titleEl.textContent = sysId ? "イベント企画の編集" : "イベント企画の新規登録";
     bodyEl.innerHTML = `
@@ -4151,25 +4258,49 @@ function openFormModal(sysId = null) {
         </label>
         <input type="text" id="fieldEventName" class="form-control" required value="${escapeHtml(rec.eventName)}" placeholder="例: 第2回 模擬授業対策会 / 幹部運営ミーティング" />
       </div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-        <div class="form-group">
-          <label class="form-label" for="fieldEventDate">
-            開催日 <span class="ro-tag">3日前・1日前・当日に通知</span>
-          </label>
-          <input type="date" id="fieldEventDate" class="form-control" value="${escapeHtml(rec.eventDate || "")}" />
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="fieldEventStatus">
-            ステータス <span class="ro-tag">日付超過で自動終了</span>
-          </label>
-          <select id="fieldEventStatus" class="form-control">
-            ${EVENT_STATUS_OPTIONS.map(s => `<option value="${s}" ${currentStatus === s ? "selected" : ""}>${s}</option>`).join("")}
-          </select>
-        </div>
+      <div class="form-group">
+        <label class="form-label" for="fieldEventDate">
+          開催日 <span class="ro-tag">3日前・1日前・当日に通知 / 出欠表と自動連携</span>
+        </label>
+        <input type="date" id="fieldEventDate" class="form-control" value="${escapeHtml(rec.eventDate || "")}" />
       </div>
+
+      <div class="form-group">
+        <label class="form-label" for="fieldEventLocationText">
+          📍 場所 <span class="ro-tag">プルダウン選択 ＋ 自由入力</span>
+        </label>
+        <div class="location-input-row">
+          <select id="fieldEventLocationPreset" class="form-control" aria-label="場所の種別を選択">
+            <option value="" ${initialPreset === "" ? "selected" : ""}>種別を選択...</option>
+            ${EVENT_LOCATION_PRESETS.map(
+              p => `<option value="${p}" ${initialPreset === p ? "selected" : ""}>${p}</option>`
+            ).join("")}
+          </select>
+          <input
+            type="text"
+            id="fieldEventLocationText"
+            class="form-control"
+            value="${escapeHtml(curLoc)}"
+            placeholder="場所を入力（例: 教室 3201 / 体育館 / Discord通話）"
+          />
+        </div>
+        <span class="form-hint">※左のプルダウンから「教室 / 体育館 / Discord通話 / その他」を選ぶと右の入力欄に反映され、教室番号などの詳細も自由に追記できます。</span>
+      </div>
+
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 4px 0;" />
+
+      <div class="form-group">
+        <label class="form-label" for="fieldEventStatus">
+          📌 ステータス <span class="ro-tag">日付超過で自動終了</span>
+        </label>
+        <select id="fieldEventStatus" class="form-control">
+          ${EVENT_STATUS_OPTIONS.map(s => `<option value="${s}" ${currentStatus === s ? "selected" : ""}>${s}</option>`).join("")}
+        </select>
+      </div>
+
       <div class="form-group">
         <label class="form-label">
-          公開範囲（閲覧権限）
+          👁️ 公開範囲（閲覧権限）
         </label>
         <label class="checkbox-item" style="padding: 10px 12px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-weight: 700; color: #92400e;">
           <input type="checkbox" id="fieldEventAdminOnly" ${rec.adminOnly ? "checked" : ""} />
@@ -4177,8 +4308,32 @@ function openFormModal(sysId = null) {
         </label>
         <span class="form-hint">※チェックを入れると、在校生・OB/OGの「イベント」一覧および「月別出欠調整」には表示されなくなります。</span>
       </div>
-      <span class="form-hint">※開催日を設定すると「出欠調整」タブの該当月の日程にも自動反映され、3日前・1日前・当日に運営メンバーへリマインド通知されます。</span>
     `;
+
+    const presetSel = document.getElementById("fieldEventLocationPreset");
+    const locInput = document.getElementById("fieldEventLocationText");
+    presetSel?.addEventListener("change", () => {
+      const val = presetSel.value;
+      if (!locInput) return;
+      if (!val) {
+        locInput.value = "";
+      } else if (val === "その他") {
+        if (["教室", "体育館", "Discord通話"].includes(locInput.value.trim())) {
+          locInput.value = "";
+        }
+        locInput.placeholder = "具体的な場所を自由に入力してください";
+        locInput.focus();
+      } else {
+        const currentText = locInput.value.trim();
+        if (!currentText || ["教室", "体育館", "Discord通話"].includes(currentText)) {
+          locInput.value = val;
+        } else if (!currentText.startsWith(val)) {
+          locInput.value = `${val}（${currentText}）`;
+        }
+        locInput.focus();
+      }
+    });
+
     document.getElementById("fieldEventDate")?.addEventListener("change", e => {
       const val = e.target.value;
       const statusSel = document.getElementById("fieldEventStatus");
@@ -4196,6 +4351,9 @@ function closeFormModal() {
   state.editingSysId = null;
 }
 
+// ==========================================================
+// DB構造プレビュー & CSVエクスポート
+// ==========================================================
 function renderDbTable() {
   const container = document.getElementById("dbTableContainer");
   const sheet = state.activeDbSheet;
@@ -4253,7 +4411,7 @@ function renderDbTable() {
               <td>${escapeHtml(t.status)}</td>
               <td>${escapeHtml(t.taskName)}</td>
               <td>${escapeHtml(t.assignee || "")}</td>
-              <td>${escapeHtml(t.dueDate || "")}</td>
+              <td>${escapeHtml(formatTaskDueText(t.dueDate))}</td>
               <td>${escapeHtml(t.memo || "")}</td>
             </tr>
           `).join("")}
@@ -4270,6 +4428,7 @@ function renderDbTable() {
             <th>イベントID</th>
             <th>イベント名</th>
             <th>開催日</th>
+            <th>場所</th>
             <th>ステータス</th>
             <th>公開範囲</th>
           </tr>
@@ -4283,6 +4442,7 @@ function renderDbTable() {
                 <td>${escapeHtml(ev.eventId)}</td>
                 <td>${escapeHtml(ev.eventName)}</td>
                 <td>${escapeHtml(ev.eventDate || "")}</td>
+                <td>${escapeHtml(ev.location || "")}</td>
                 <td>${escapeHtml(evStatus)}</td>
                 <td>${ev.adminOnly ? "運営限定" : "全員公開"}</td>
               </tr>
@@ -4355,18 +4515,19 @@ function downloadCurrentSheetCsv() {
       t.status,
       t.taskName,
       t.assignee || "",
-      t.dueDate || "",
+      formatTaskDueText(t.dueDate),
       t.memo || ""
     ]);
     filename = "教職の森_運営管理アプリDB_タスク.csv";
   } else if (sheet === "events") {
     refreshAllEventStatuses(db.events);
-    headers = ["システムID", "イベントID", "イベント名", "開催日", "ステータス", "公開範囲"];
+    headers = ["システムID", "イベントID", "イベント名", "開催日", "場所", "ステータス", "公開範囲"];
     rows = db.events.map(ev => [
       ev.sysId,
       ev.eventId,
       ev.eventName,
       ev.eventDate || "",
+      ev.location || "",
       getAutoEventStatus(ev),
       ev.adminOnly ? "運営限定" : "全員公開"
     ]);
@@ -4430,11 +4591,12 @@ function closeSyncModal() {
   document.getElementById("syncModal")?.classList.remove("open");
 }
 
-// 初期化処理
+// ==========================================================
+// 初期化処理 & イベントリスナー登録
+// ==========================================================
 document.addEventListener("DOMContentLoaded", () => {
   initSwipeTabNavigation();
 
-  // 三本線（ハンバーガー）ドロワーメニュー開閉イベント
   document.getElementById("btnOpenDrawer")?.addEventListener("click", openDrawer);
   document.getElementById("btnCloseDrawer")?.addEventListener("click", closeDrawer);
   document.getElementById("drawerBackdrop")?.addEventListener("click", closeDrawer);
@@ -4444,7 +4606,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // ドロワー内の「🔔 通知」ボタン
   document.getElementById("btnHeaderNotifications")?.addEventListener("click", () => {
     closeDrawer();
     openNotificationsModal();
@@ -4689,12 +4850,22 @@ document.addEventListener("DOMContentLoaded", () => {
       const dueY = document.getElementById("fieldTaskDueYear")?.value || "";
       const dueM = document.getElementById("fieldTaskDueMonth")?.value || "";
       const dueD = document.getElementById("fieldTaskDueDay")?.value || "";
+
       let dueDate = "";
-      if (dueY && dueM && dueD) {
-        const maxDay = new Date(Number(dueY), Number(dueM), 0).getDate();
+      if (dueM && TASK_PERIOD_OPTIONS.includes(dueD)) {
+        // 〇月上旬 / 中旬 / 下旬 の保存
+        const mPad = String(dueM).padStart(2, "0");
+        dueDate = dueY ? `${dueY}-${mPad}-${dueD}` : `${mPad}-${dueD}`;
+      } else if (dueM && dueD) {
+        // 具体的な日付（1〜31日）の保存
+        const yNum = dueY ? Number(dueY) : new Date().getFullYear();
+        const maxDay = new Date(yNum, Number(dueM), 0).getDate();
         const validDay = Math.min(Number(dueD), maxDay);
-        dueDate = `${dueY}-${String(dueM).padStart(2, "0")}-${String(validDay).padStart(2, "0")}`;
+        dueDate = `${yNum}-${String(dueM).padStart(2, "0")}-${String(validDay).padStart(2, "0")}`;
+      } else if (dueY && dueM) {
+        dueDate = `${dueY}-${String(dueM).padStart(2, "0")}`;
       }
+
       const memo = (document.getElementById("fieldTaskMemo")?.value || "").trim();
       if (!taskName) return;
 
@@ -4722,6 +4893,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const eventId = document.getElementById("fieldEventId").value;
       const eventName = document.getElementById("fieldEventName").value.trim();
       const eventDate = document.getElementById("fieldEventDate").value.trim();
+      const presetLoc = (document.getElementById("fieldEventLocationPreset")?.value || "").trim();
+      const textLoc = (document.getElementById("fieldEventLocationText")?.value || "").trim();
+      const location = textLoc || (presetLoc && presetLoc !== "その他" ? presetLoc : "");
       const manualStatus = document.getElementById("fieldEventStatus")?.value || "開催";
       const adminOnly = Boolean(document.getElementById("fieldEventAdminOnly")?.checked);
       if (!eventName) return;
@@ -4737,6 +4911,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const previousDate = target.eventDate || "";
           target.eventName = eventName;
           target.eventDate = eventDate;
+          target.location = location;
           target.status = computedStatus;
           target.adminOnly = adminOnly;
           syncEventToMonthlySchedule(target, previousDate);
@@ -4747,6 +4922,7 @@ document.addEventListener("DOMContentLoaded", () => {
           eventId,
           eventName,
           eventDate,
+          location,
           status: computedStatus,
           adminOnly
         };
@@ -4770,7 +4946,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderView();
   });
 
-  // ドロワー内の「🔗 フォーム連携」ボタン
   document.getElementById("btnOpenSyncModal")?.addEventListener("click", () => {
     closeDrawer();
     openSyncModal();
@@ -4824,7 +4999,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // ドロワー内の「📊 DB・CSV」ボタン
   const dbModal = document.getElementById("dbModal");
   document.getElementById("btnOpenDbModal")?.addEventListener("click", () => {
     closeDrawer();
@@ -4863,7 +5037,6 @@ document.addEventListener("DOMContentLoaded", () => {
     checkAndTriggerAdminPushNotifications(false);
   });
 
-  // ドロワー内およびプレビューバーのログイン/ログアウトボタン
   const handleAuthButtonClick = () => {
     closeDrawer();
     if (state.currentUser) {
@@ -4892,7 +5065,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // 初回起動時にロールとクラウドDBを取得して描画＆プッシュ通知チェック
   fetchCurrentUserRole().then(role => {
     applyRbacUi(role);
     renderFilters();
