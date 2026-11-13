@@ -378,7 +378,19 @@ div[class*="netlify-badge"],
   cursor: pointer;
 }
 
-/* Multi-select Status Filter Chips (Tasks Tab) */
+/* 並び替え（日付順 / ID順）専用セレクト */
+.sort-select {
+  padding: 7px 10px;
+  border: 1.5px solid var(--primary);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: var(--primary-pale);
+  color: var(--primary-dark);
+  cursor: pointer;
+}
+
+/* Multi-select Status Filter Chips (Tasks & Events Tab) */
 .multi-filter-group {
   display: flex;
   align-items: center;
@@ -670,6 +682,12 @@ div[class*="netlify-badge"],
   border: 1px solid #cbd5e1;
 }
 
+.badge-location {
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+
 /* Role badges */
 .role-rep { background: #fef3c7; color: #92400e; }
 .role-subrep { background: #ffedd5; color: #9a3412; }
@@ -765,6 +783,14 @@ div[class*="netlify-badge"],
   font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
+}
+
+/* イベント場所のプルダウン＋テキスト入力欄レイアウト */
+.location-input-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 8px;
+  align-items: center;
 }
 
 /* Buttons */
@@ -1529,11 +1555,16 @@ div[class*="netlify-badge"],
     justify-content: flex-end;
   }
 
-  body.mobile-preview-mode .filter-select {
+  body.mobile-preview-mode .filter-select,
+  body.mobile-preview-mode .sort-select {
     flex: 1;
     min-width: 105px;
     font-size: 0.78rem;
     padding: 6px 8px;
+  }
+
+  body.mobile-preview-mode .location-input-row {
+    grid-template-columns: 1fr;
   }
 
   body.mobile-preview-mode .sync-banner {
@@ -1678,6 +1709,9 @@ div[class*="netlify-badge"],
   .item-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+  .location-input-row {
+    grid-template-columns: 1fr;
   }
   .bulk-date-row {
     flex-direction: column;
