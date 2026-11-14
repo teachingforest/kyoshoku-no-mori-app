@@ -317,9 +317,58 @@ function updateAttendanceNotificationBadge() {
 }
 
 // ==========================================================
-// 運営メンバー向けプッシュ通知機能（タスク・イベントの3日前 / 1日前 / 当日）
+// 運営メンバー向けプッシュ通知機能（ON/OFF切替・カスタム通知タイミング対応）
 // ==========================================================
 const REMINDER_TARGET_DAYS = [3, 1, 0];
+const NOTIFY_DAY_OPTIONS = [
+  { days: 14, label: "14日前（2週間前）", shortLabel: "14日前" },
+  { days: 7, label: "7日前（1週間前）", shortLabel: "7日前" },
+  { days: 5, label: "5日前", shortLabel: "5日前" },
+  { days: 3, label: "3日前", shortLabel: "3日前" },
+  { days: 2, label: "2日前", shortLabel: "2日前" },
+  { days: 1, label: "1日前（前日）", shortLabel: "1日前" },
+  { days: 0, label: "当日（0日後）", shortLabel: "当日" }
+];
+
+function isRecordNotifyEnabled(rec) {
+  if (!rec) return false;
+  return typeof rec.notifyEnabled === "boolean" ? rec.notifyEnabled : true;
+}
+
+function getRecordNotifyDays(rec) {
+  if (!rec) return [...REMINDER_TARGET_DAYS];
+  if (Array.isArray(rec.notifyDays)) {
+    const cleaned = Array.from(
+      new Set(
+        rec.notifyDays
+          .map(n => Number(n))
+          .filter(n => Number.isInteger(n) && n >= 0 && n <= 60)
+      )
+    ).sort((a, b) => b - a);
+    return cleaned;
+  }
+  return [...REMINDER_TARGET_DAYS];
+}
+
+function formatNotifyDaysText(daysArr) {
+  if (!Array.isArray(daysArr) || daysArr.length === 0) return "タイミング未選択";
+  const sorted = [...daysArr].sort((a, b) => b - a);
+  return sorted.map(d => (d === 0 ? "当日" : `${d}日前`)).join("・");
+}
+
+function formatNotifySettingSummary(rec) {
+  if (!isRecordNotifyEnabled(rec)) return "🔕 通知OFF";
+  const days = getRecordNotifyDays(rec);
+  if (days.length === 0) return "🔕 通知OFF（タイミング未選択）";
+  return `🔔 通知ON（${formatNotifyDaysText(days)}）`;
+}
+
+function isRecordReminderTargetToday(rec, isoDate) {
+  if (!rec || !isoDate || !isRecordNotifyEnabled(rec)) return false;
+  const diff = getDaysUntilIsoDate(isoDate);
+  if (diff === null) return false;
+  return getRecordNotifyDays(rec).includes(diff);
+}
 
 function getDaysUntilIsoDate(isoDate) {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
@@ -337,9 +386,10 @@ function getActiveAdminReminders() {
   const todayIso = getTodayIsoString();
 
   (db.tasks || []).forEach(t => {
-    if (!t || t.status === "完了" || !t.dueDate) return;
+    if (!t || t.status === "完了" || !t.dueDate || !isRecordNotifyEnabled(t)) return;
     const diff = getDaysUntilIsoDate(t.dueDate);
-    if (diff !== null && REMINDER_TARGET_DAYS.includes(diff)) {
+    const targetDays = getRecordNotifyDays(t);
+    if (diff !== null && targetDays.includes(diff)) {
       reminders.push({
         key: `task_${t.sysId}_${todayIso}_d${diff}`,
         type: "task",
@@ -348,15 +398,19 @@ function getActiveAdminReminders() {
         targetDate: t.dueDate,
         title: t.taskName,
         status: t.status,
-        message: `タスク「${t.taskName}」期日まであと${diff}日`
+        message:
+          diff === 0
+            ? `タスク「${t.taskName}」は本日が期日です`
+            : `タスク「${t.taskName}」期日まであと${diff}日`
       });
     }
   });
 
   (db.events || []).forEach(ev => {
-    if (!ev || !ev.eventDate) return;
+    if (!ev || !ev.eventDate || !isRecordNotifyEnabled(ev)) return;
     const diff = getDaysUntilIsoDate(ev.eventDate);
-    if (diff !== null && REMINDER_TARGET_DAYS.includes(diff)) {
+    const targetDays = getRecordNotifyDays(ev);
+    if (diff !== null && targetDays.includes(diff)) {
       reminders.push({
         key: `event_${ev.sysId}_${todayIso}_d${diff}`,
         type: "event",
@@ -365,7 +419,10 @@ function getActiveAdminReminders() {
         targetDate: ev.eventDate,
         title: ev.eventName,
         adminOnly: Boolean(ev.adminOnly),
-        message: `${diff}日後に「${ev.eventName}」全体にリマインド`
+        message:
+          diff === 0
+            ? `本日「${ev.eventName}」開催日（全体リマインド）`
+            : `${diff}日後に「${ev.eventName}」全体にリマインド`
       });
     }
   });
@@ -595,7 +652,8 @@ function openNotificationsModal() {
         ${permLabel}
       </div>
       <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 4px; line-height: 1.5;">
-        タスク（未完了）とイベントの<strong>3日前・1日前・当日（0日後）</strong>に、運営メンバーへ自動でプッシュ通知を行います。
+        タスク（未完了）とイベントごとに設定されたタイミング（初期値：<strong>3日前・1日前・当日</strong>）で、運営メンバーへ自動でプッシュ通知を行います。<br />
+        ※各タスク・イベントの「<strong>✏️ 編集</strong>」画面から、<strong>通知のON/OFF</strong>や<strong>通知タイミング（14日前〜当日）</strong>を個別に変更できます。
       </div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
         ${perm === "default"
@@ -610,12 +668,12 @@ function openNotificationsModal() {
 
     <div class="form-group" style="margin-top: 4px;">
       <label class="form-label">
-        📋 本日のリマインド対象（3日前・1日前・当日：${reminders.length}件）
+        📋 本日のリマインド対象（${reminders.length}件）
       </label>
       ${reminders.length === 0
         ? `
           <div class="empty-state" style="padding: 24px 14px;">
-            本日通知対象（3日前・1日前・当日）の未完了タスクやイベントはありません。
+            本日通知対象になっている未完了タスクやイベントはありません。
           </div>
         `
         : `
@@ -1672,7 +1730,12 @@ const DEFAULT_DB = {
 let db = loadDb();
 let state = {
   currentView: "members",
+  tasksLayout: "list",
   eventsLayout: "list",
+  tasksCalendarMonth: getTodayIsoString().slice(0, 7),
+  tasksCalendarSelectedDate: getTodayIsoString(),
+  eventsCalendarMonth: getTodayIsoString().slice(0, 7),
+  eventsCalendarSelectedDate: getTodayIsoString(),
   selectedMonth: getTodayIsoString().slice(0, 7),
   searchQuery: "",
   roleFilter: "ALL",
@@ -1863,7 +1926,9 @@ function syncScheduleDateToEvents(ym, dateObj, targetDb = db) {
     eventName: dateObj.title || "サークル活動",
     eventDate: dateObj.isoDate || "",
     location: dateObj.location || "",
-    adminOnly: Boolean(dateObj.adminOnly)
+    adminOnly: Boolean(dateObj.adminOnly),
+    notifyEnabled: true,
+    notifyDays: [...REMINDER_TARGET_DAYS]
   };
   getAutoEventStatus(newEv);
   targetDb.events.push(newEv);
@@ -1922,9 +1987,18 @@ function reconcileEventsAndSchedules(targetDb = db) {
     });
   });
 
+  if (!Array.isArray(targetDb.tasks)) targetDb.tasks = [];
+  targetDb.tasks.forEach(t => {
+    if (!t) return;
+    t.notifyEnabled = isRecordNotifyEnabled(t);
+    t.notifyDays = getRecordNotifyDays(t);
+  });
+
   targetDb.events.forEach(ev => {
     ev.adminOnly = Boolean(ev.adminOnly);
     if (typeof ev.location !== "string") ev.location = "";
+    ev.notifyEnabled = isRecordNotifyEnabled(ev);
+    ev.notifyDays = getRecordNotifyDays(ev);
     getAutoEventStatus(ev);
     if (ev.eventDate) {
       syncEventToMonthlySchedule(ev, null, targetDb);
@@ -2425,6 +2499,327 @@ function deleteRecordById(viewType, sysId) {
 }
 
 // ==========================================================
+// カレンダー表示用の月移動・描画ヘルパー（タスク・イベント共通）
+// ==========================================================
+function shiftYearMonth(ym, deltaMonths) {
+  const [y, m] = (ym || getTodayIsoString().slice(0, 7)).split("-").map(Number);
+  const dt = new Date(y, m - 1 + deltaMonths, 1);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function renderTaskRowHtml(t) {
+  const formattedDue = formatTaskDueText(t.dueDate);
+  const notifyEnabled = isRecordNotifyEnabled(t);
+  const notifySummary = formatNotifySettingSummary(t);
+  const hasSubMeta = Boolean(t.assignee || formattedDue || t.memo || notifySummary);
+  const diffDays = t.status !== "完了" && t.dueDate ? getDaysUntilIsoDate(t.dueDate) : null;
+  const isReminderTarget = t.status !== "完了" && isRecordReminderTargetToday(t, t.dueDate);
+
+  return `
+    <article class="list-row item-card-clickable" data-task-row="${escapeHtml(t.sysId)}" style="${isReminderTarget ? "border-left: 4px solid #dc2626;" : ""}">
+      <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 4px;">
+        <div class="task-parallel-row">
+          <span class="task-id-large">${escapeHtml(t.taskId)}</span>
+          <span class="badge task-status-large ${getStatusBadgeClass(t.status)}">${escapeHtml(t.status)}</span>
+          ${isReminderTarget
+            ? `<span class="badge" style="background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;">🔔 ${diffDays === 0 ? "本日が期日" : `期日まであと${diffDays}日`}</span>`
+            : ""
+          }
+          <span class="badge ${notifyEnabled ? "badge-notify" : "badge-notify-off"}">${escapeHtml(notifySummary)}</span>
+          <span class="task-name-large">${escapeHtml(t.taskName)}</span>
+        </div>
+        ${hasSubMeta ? `
+          <div class="task-sub-meta">
+            ${t.assignee ? `<span>👤 担当: <strong>${escapeHtml(t.assignee)}</strong></span>` : ""}
+            ${formattedDue ? `<span>⏰ 期限: <strong>${escapeHtml(formattedDue)}</strong></span>` : ""}
+            ${t.memo ? `<span>📝 ${escapeHtml(t.memo.length > 35 ? t.memo.slice(0, 35) + "…" : t.memo)}</span>` : ""}
+          </div>
+        ` : ""}
+      </div>
+      <div class="item-actions">
+        <select class="status-quick-select" data-quick-status="${escapeHtml(t.sysId)}" aria-label="進捗変更">
+          ${STATUS_OPTIONS.map(s => `<option value="${s}" ${t.status === s ? "selected" : ""}>${s}</option>`).join("")}
+        </select>
+        <button type="button" class="btn-icon" data-task-detail="${escapeHtml(t.sysId)}" style="font-weight: 700; color: var(--primary-dark); border-color: #a7f3d0; background: #ecfdf5;">
+          📄 詳細
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+function renderEventExtraBadgesHtml(ev, isAdmin) {
+  const badges = [];
+  if (ev.location) {
+    badges.push(`<span class="badge badge-location">📍 ${escapeHtml(ev.location)}</span>`);
+  }
+  if (ev.adminOnly) {
+    badges.push(`<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`);
+  }
+  if (isAdmin) {
+    const notifyEnabled = isRecordNotifyEnabled(ev);
+    badges.push(
+      `<span class="badge ${notifyEnabled ? "badge-notify" : "badge-notify-off"}">${escapeHtml(formatNotifySettingSummary(ev))}</span>`
+    );
+    if (ev.eventDate && isRecordReminderTargetToday(ev, ev.eventDate)) {
+      const diff = getDaysUntilIsoDate(ev.eventDate);
+      badges.push(
+        `<span class="badge" style="background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;">🔔 ${diff === 0 ? "本日開催リマインド" : `${diff}日後に全体リマインド`}</span>`
+      );
+    }
+  }
+  return badges.join("");
+}
+
+function renderEventRowHtml(ev, isAdmin) {
+  const evStatus = getAutoEventStatus(ev);
+  return `
+    <article class="list-row item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" style="${ev.adminOnly ? "border-left: 4px solid #d97706;" : ""}" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
+      <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 8px; width: 100%;">
+        <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <span class="badge badge-id">${escapeHtml(ev.eventId)}</span>
+            <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
+            ${renderEventExtraBadgesHtml(ev, isAdmin)}
+          </div>
+          <span class="card-chevron" aria-hidden="true">›</span>
+        </div>
+        <div class="event-parallel-row">
+          <span class="event-date-large">
+            ${formatEventDateHtml(ev.eventDate)}
+          </span>
+          <span class="event-name-large">${escapeHtml(ev.eventName)}</span>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderCalendarViewHtml(viewType, filteredList, isAdmin) {
+  const isTask = viewType === "tasks";
+  const todayIso = getTodayIsoString();
+  let calMonth = isTask ? state.tasksCalendarMonth : state.eventsCalendarMonth;
+  if (!calMonth || !/^\d{4}-\d{2}$/.test(calMonth)) {
+    calMonth = todayIso.slice(0, 7);
+  }
+
+  let selectedDate = isTask ? state.tasksCalendarSelectedDate : state.eventsCalendarSelectedDate;
+
+  // 日付マップ（YYYY-MM-DD -> items[]）を作成
+  const dateMap = new Map();
+  const periodTasksInMonth = [];
+
+  filteredList.forEach(item => {
+    const rawDate = isTask ? String(item.dueDate || "").trim() : String(item.eventDate || "").trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+      if (!dateMap.has(rawDate)) dateMap.set(rawDate, []);
+      dateMap.get(rawDate).push(item);
+    } else if (isTask && rawDate) {
+      const [cy, cm] = calMonth.split("-").map(Number);
+      const m1 = rawDate.match(/^(\d{4})-0?(\d{1,2})-(上旬|中旬|下旬)$/);
+      const m2 = rawDate.match(/^0?(\d{1,2})-(上旬|中旬|下旬)$/);
+      const m3 = rawDate.match(/^(\d{4})-0?(\d{1,2})$/);
+      if (
+        (m1 && Number(m1[1]) === cy && Number(m1[2]) === cm) ||
+        (m2 && Number(m2[1]) === cm) ||
+        (m3 && Number(m3[1]) === cy && Number(m3[2]) === cm)
+      ) {
+        periodTasksInMonth.push(item);
+      }
+    }
+  });
+
+  if (!selectedDate || !selectedDate.startsWith(calMonth + "-")) {
+    const monthDatesWithItems = Array.from(dateMap.keys())
+      .filter(d => d.startsWith(calMonth + "-"))
+      .sort();
+    if (calMonth === todayIso.slice(0, 7)) {
+      selectedDate = todayIso;
+    } else if (monthDatesWithItems.length > 0) {
+      selectedDate = monthDatesWithItems[0];
+    } else {
+      selectedDate = `${calMonth}-01`;
+    }
+    if (isTask) {
+      state.tasksCalendarSelectedDate = selectedDate;
+    } else {
+      state.eventsCalendarSelectedDate = selectedDate;
+    }
+  }
+
+  const [year, month] = calMonth.split("-").map(Number);
+  const firstDay = new Date(year, month - 1, 1);
+  const startDow = firstDay.getDay();
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const prevMonthDays = new Date(year, month - 1, 0).getDate();
+
+  const cells = [];
+  // 前月の余白セル
+  for (let i = startDow - 1; i >= 0; i--) {
+    const d = prevMonthDays - i;
+    cells.push({
+      dayNum: d,
+      isoDate: "",
+      isOtherMonth: true,
+      dow: (startDow - 1 - i) % 7,
+      items: []
+    });
+  }
+  // 当月のセル
+  for (let d = 1; d <= daysInMonth; d++) {
+    const isoDate = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const dow = new Date(year, month - 1, d).getDay();
+    const items = dateMap.get(isoDate) || [];
+    cells.push({
+      dayNum: d,
+      isoDate,
+      isOtherMonth: false,
+      dow,
+      items
+    });
+  }
+  // 翌月の余白セル
+  let nextDay = 1;
+  while (cells.length % 7 !== 0) {
+    cells.push({
+      dayNum: nextDay++,
+      isoDate: "",
+      isOtherMonth: true,
+      dow: cells.length % 7,
+      items: []
+    });
+  }
+
+  const selectedDayItems = dateMap.get(selectedDate) || [];
+  const [sy, sm, sd] = selectedDate.split("-").map(Number);
+  const selDow = ["日", "月", "火", "水", "木", "金", "土"][new Date(sy, sm - 1, sd).getDay()] || "";
+
+  return `
+    <div class="calendar-wrapper">
+      <div class="calendar-card">
+        <div class="calendar-header">
+          <div class="calendar-nav-group">
+            <button type="button" class="calendar-nav-btn" id="btnCalPrevMonth" aria-label="前の月">◀ 前月</button>
+            <div class="calendar-month-title">${year}年${month}月</div>
+            <button type="button" class="calendar-nav-btn" id="btnCalNextMonth" aria-label="次の月">次月 ▶</button>
+            <button type="button" class="calendar-nav-btn" id="btnCalToday" style="font-size: 0.76rem; padding: 4px 9px;">今日</button>
+          </div>
+          <div class="calendar-legend">
+            <span class="calendar-legend-item">
+              <span class="calendar-legend-circle"></span>
+              <span>${isTask ? "期限がある日（丸印）" : "予定がある日（丸印）"}</span>
+            </span>
+            <span class="calendar-legend-item">
+              <span class="calendar-legend-circle urgent"></span>
+              <span>通知対象日</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="calendar-weekdays">
+          <div class="calendar-weekday sun">日</div>
+          <div class="calendar-weekday">月</div>
+          <div class="calendar-weekday">火</div>
+          <div class="calendar-weekday">水</div>
+          <div class="calendar-weekday">木</div>
+          <div class="calendar-weekday">金</div>
+          <div class="calendar-weekday sat">土</div>
+        </div>
+
+        <div class="calendar-grid">
+          ${cells.map(c => {
+            if (c.isOtherMonth) {
+              return `
+                <div class="calendar-day-cell is-other-month">
+                  <span class="calendar-day-num">${c.dayNum}</span>
+                </div>
+              `;
+            }
+
+            const hasItems = c.items.length > 0;
+            const hasUrgent = c.items.some(it =>
+              isTask
+                ? it.status !== "完了" && isRecordReminderTargetToday(it, it.dueDate)
+                : isRecordReminderTargetToday(it, it.eventDate)
+            );
+            const isToday = c.isoDate === todayIso;
+            const isSelected = c.isoDate === selectedDate;
+            const dowClass = c.dow === 0 ? "sun" : c.dow === 6 ? "sat" : "";
+
+            const previewItems = c.items.slice(0, 2);
+            const remainCount = c.items.length - previewItems.length;
+
+            return `
+              <div
+                class="calendar-day-cell ${dowClass} ${hasItems ? "has-items" : ""} ${hasUrgent ? "has-urgent" : ""} ${isToday ? "is-today" : ""} ${isSelected ? "is-selected" : ""}"
+                data-cal-date="${escapeHtml(c.isoDate)}"
+                role="button"
+                tabindex="0"
+                aria-label="${year}年${month}月${c.dayNum}日 ${c.items.length}件"
+              >
+                <span class="calendar-day-num" title="${hasItems ? `${c.items.length}件の${isTask ? "タスク期限" : "イベント予定"}` : ""}">${c.dayNum}</span>
+                ${hasItems ? `
+                  <div class="calendar-cell-items">
+                    ${previewItems.map(it => {
+                      const label = isTask ? it.taskName : it.eventName;
+                      const isItemUrgent = isTask
+                        ? it.status !== "完了" && isRecordReminderTargetToday(it, it.dueDate)
+                        : isRecordReminderTargetToday(it, it.eventDate);
+                      const extraPillClass = isItemUrgent
+                        ? "urgent"
+                        : !isTask && it.adminOnly
+                        ? "admin-only"
+                        : (!isTask && getAutoEventStatus(it) === "終了") || (isTask && it.status === "完了")
+                        ? "ended"
+                        : "";
+                      return `<span class="calendar-mini-pill ${extraPillClass}" data-cal-item-id="${escapeHtml(it.sysId)}">${escapeHtml(label)}</span>`;
+                    }).join("")}
+                    ${remainCount > 0 ? `<div class="calendar-more-count">+他${remainCount}件</div>` : ""}
+                  </div>
+                ` : ""}
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+
+      <div class="calendar-selected-panel">
+        <div class="calendar-selected-header">
+          <div class="calendar-selected-title">
+            <span>📌 ${sy}年${sm}月${sd}日（${selDow}）の${isTask ? "期限タスク" : "イベント予定"}</span>
+            <span class="badge badge-id">${selectedDayItems.length}件</span>
+          </div>
+        </div>
+        ${selectedDayItems.length === 0
+          ? `<div style="font-size: 0.84rem; color: var(--text-muted); padding: 10px 4px;">この日に設定された${isTask ? "タスク期限" : "イベント予定"}はありません。カレンダーの丸が付いた日付をタップすると詳細が表示されます。</div>`
+          : `
+            <div class="list-stack">
+              ${selectedDayItems
+                .map(it => (isTask ? renderTaskRowHtml(it) : renderEventRowHtml(it, isAdmin)))
+                .join("")}
+            </div>
+          `
+        }
+      </div>
+
+      ${isTask && periodTasksInMonth.length > 0 ? `
+        <div class="calendar-selected-panel">
+          <div class="calendar-selected-header">
+            <div class="calendar-selected-title">
+              <span>🗓️ ${year}年${month}月の時期指定タスク（上旬・中旬・下旬など）</span>
+              <span class="badge badge-id">${periodTasksInMonth.length}件</span>
+            </div>
+          </div>
+          <div class="list-stack">
+            ${periodTasksInMonth.map(t => renderTaskRowHtml(t)).join("")}
+          </div>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+// ==========================================================
 // メインビューの描画
 // ==========================================================
 function renderView() {
@@ -2445,6 +2840,14 @@ function renderView() {
 
   if (btnClearTab) {
     btnClearTab.style.display = "none";
+  }
+
+  // タスクタブ・イベントタブの表示切替ボタン（リスト / カレンダー）の状態を同期
+  if (state.currentView === "tasks" || state.currentView === "events") {
+    const activeLayout = state.currentView === "tasks" ? state.tasksLayout : state.eventsLayout;
+    document.querySelectorAll("#eventsViewToggleWrap .view-toggle-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.layout === activeLayout);
+    });
   }
 
   if (state.currentView === "members") {
@@ -2549,7 +2952,7 @@ function renderView() {
   } else if (state.currentView === "tasks") {
     titleEl.textContent = "タスク";
     fabLabel.textContent = "タスク追加";
-    eventsToggleWrap.style.display = "none";
+    eventsToggleWrap.style.display = "block";
 
     const filteredRaw = db.tasks.filter(t => {
       const jpDue = formatTaskDueText(t.dueDate);
@@ -2569,52 +2972,19 @@ function renderView() {
     const filtered = sortTasksList(filteredRaw, state.taskSortOrder);
     countEl.textContent = `${filtered.length}件`;
 
-    if (filtered.length === 0) {
+    if (state.tasksLayout === "calendar") {
+      contentEl.innerHTML = renderCalendarViewHtml("tasks", filtered, isAdminRole(state.userRole));
+    } else if (filtered.length === 0) {
       contentEl.innerHTML = `<div class="empty-state">表示対象のタスクはありません（「完了」タスクを表示する場合は上部の進捗フィルターで「完了」にチェックを入れてください）。</div>`;
       applyRbacUi(state.userRole);
       return;
+    } else {
+      contentEl.innerHTML = `
+        <div class="list-stack">
+          ${filtered.map(t => renderTaskRowHtml(t)).join("")}
+        </div>
+      `;
     }
-
-    contentEl.innerHTML = `
-      <div class="list-stack">
-        ${filtered.map(t => {
-          const formattedDue = formatTaskDueText(t.dueDate);
-          const hasSubMeta = Boolean(t.assignee || formattedDue || t.memo);
-          const diffDays = t.status !== "完了" && t.dueDate ? getDaysUntilIsoDate(t.dueDate) : null;
-          const isReminderTarget = diffDays !== null && REMINDER_TARGET_DAYS.includes(diffDays);
-          return `
-            <article class="list-row item-card-clickable" data-task-row="${escapeHtml(t.sysId)}" style="${isReminderTarget ? "border-left: 4px solid #dc2626;" : ""}">
-              <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 4px;">
-                <div class="task-parallel-row">
-                  <span class="task-id-large">${escapeHtml(t.taskId)}</span>
-                  <span class="badge task-status-large ${getStatusBadgeClass(t.status)}">${escapeHtml(t.status)}</span>
-                  ${isReminderTarget
-                    ? `<span class="badge" style="background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;">🔔 期日まであと${diffDays}日</span>`
-                    : ""
-                  }
-                  <span class="task-name-large">${escapeHtml(t.taskName)}</span>
-                </div>
-                ${hasSubMeta ? `
-                  <div class="task-sub-meta">
-                    ${t.assignee ? `<span>👤 担当: <strong>${escapeHtml(t.assignee)}</strong></span>` : ""}
-                    ${formattedDue ? `<span>⏰ 期限: <strong>${escapeHtml(formattedDue)}</strong></span>` : ""}
-                    ${t.memo ? `<span>📝 ${escapeHtml(t.memo.length > 35 ? t.memo.slice(0, 35) + "…" : t.memo)}</span>` : ""}
-                  </div>
-                ` : ""}
-              </div>
-              <div class="item-actions">
-                <select class="status-quick-select" data-quick-status="${escapeHtml(t.sysId)}" aria-label="進捗変更">
-                  ${STATUS_OPTIONS.map(s => `<option value="${s}" ${t.status === s ? "selected" : ""}>${s}</option>`).join("")}
-                </select>
-                <button type="button" class="btn-icon" data-task-detail="${escapeHtml(t.sysId)}" style="font-weight: 700; color: var(--primary-dark); border-color: #a7f3d0; background: #ecfdf5;">
-                  📄 詳細
-                </button>
-              </div>
-            </article>
-          `;
-        }).join("")}
-      </div>
-    `;
   } else if (state.currentView === "events") {
     titleEl.textContent = "イベント";
     fabLabel.textContent = "イベント追加";
@@ -2653,83 +3023,16 @@ function renderView() {
     const filtered = sortEventsList(filteredRaw, state.eventSortOrder);
     countEl.textContent = `${filtered.length}件`;
 
-    if (filtered.length === 0) {
+    if (state.eventsLayout === "calendar") {
+      contentEl.innerHTML = renderCalendarViewHtml("events", filtered, isAdmin);
+    } else if (filtered.length === 0) {
       contentEl.innerHTML = `<div class="empty-state">表示対象のイベント企画はありません（過去の「終了」イベントを表示する場合は上部のステータスで「終了」にチェックを入れてください）。</div>`;
       applyRbacUi(state.userRole);
       return;
-    }
-
-    const renderEventExtraBadges = ev => {
-      const badges = [];
-      if (ev.location) {
-        badges.push(`<span class="badge badge-location">📍 ${escapeHtml(ev.location)}</span>`);
-      }
-      if (ev.adminOnly) {
-        badges.push(`<span class="badge" style="background: #fef3c7; color: #92400e; border: 1px solid #fde68a;">🔒 運営限定</span>`);
-      }
-      if (isAdmin && ev.eventDate) {
-        const diff = getDaysUntilIsoDate(ev.eventDate);
-        if (diff !== null && REMINDER_TARGET_DAYS.includes(diff)) {
-          badges.push(`<span class="badge" style="background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5;">🔔 ${diff}日後に全体リマインド</span>`);
-        }
-      }
-      return badges.join("");
-    };
-
-    if (state.eventsLayout === "deck") {
-      contentEl.innerHTML = `
-        <div class="card-grid">
-          ${filtered.map(ev => {
-            const evStatus = getAutoEventStatus(ev);
-            return `
-              <article class="item-card item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" style="${ev.adminOnly ? "border-left: 4px solid #d97706;" : ""}" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
-                <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 8px; width: 100%;">
-                  <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                      <span class="badge badge-id">${escapeHtml(ev.eventId)}</span>
-                      <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
-                      ${renderEventExtraBadges(ev)}
-                    </div>
-                    <span class="card-chevron" aria-hidden="true">›</span>
-                  </div>
-                  <div class="event-parallel-row">
-                    <span class="event-date-large">
-                      ${formatEventDateHtml(ev.eventDate)}
-                    </span>
-                    <span class="event-name-large">${escapeHtml(ev.eventName)}</span>
-                  </div>
-                </div>
-              </article>
-            `;
-          }).join("")}
-        </div>
-      `;
     } else {
       contentEl.innerHTML = `
         <div class="list-stack">
-          ${filtered.map(ev => {
-            const evStatus = getAutoEventStatus(ev);
-            return `
-              <article class="list-row item-card-clickable" data-event-detail="${escapeHtml(ev.sysId)}" role="button" tabindex="0" style="${ev.adminOnly ? "border-left: 4px solid #d97706;" : ""}" aria-label="${escapeHtml(ev.eventName)}の詳細を表示">
-                <div class="item-main" style="flex-direction: column; align-items: flex-start; gap: 8px; width: 100%;">
-                  <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                      <span class="badge badge-id">${escapeHtml(ev.eventId)}</span>
-                      <span class="badge ${getEventStatusBadgeClass(evStatus)}">${escapeHtml(evStatus)}</span>
-                      ${renderEventExtraBadges(ev)}
-                    </div>
-                    <span class="card-chevron" aria-hidden="true">›</span>
-                  </div>
-                  <div class="event-parallel-row">
-                    <span class="event-date-large">
-                      ${formatEventDateHtml(ev.eventDate)}
-                    </span>
-                    <span class="event-name-large">${escapeHtml(ev.eventName)}</span>
-                  </div>
-                </div>
-              </article>
-            `;
-          }).join("")}
+          ${filtered.map(ev => renderEventRowHtml(ev, isAdmin)).join("")}
         </div>
       `;
     }
@@ -2746,6 +3049,60 @@ function renderView() {
     renderAttendanceView();
     return;
   }
+
+  // カレンダー操作イベントのバインド
+  document.getElementById("btnCalPrevMonth")?.addEventListener("click", () => {
+    if (state.currentView === "tasks") {
+      state.tasksCalendarMonth = shiftYearMonth(state.tasksCalendarMonth, -1);
+    } else {
+      state.eventsCalendarMonth = shiftYearMonth(state.eventsCalendarMonth, -1);
+    }
+    renderView();
+  });
+
+  document.getElementById("btnCalNextMonth")?.addEventListener("click", () => {
+    if (state.currentView === "tasks") {
+      state.tasksCalendarMonth = shiftYearMonth(state.tasksCalendarMonth, 1);
+    } else {
+      state.eventsCalendarMonth = shiftYearMonth(state.eventsCalendarMonth, 1);
+    }
+    renderView();
+  });
+
+  document.getElementById("btnCalToday")?.addEventListener("click", () => {
+    const todayIso = getTodayIsoString();
+    if (state.currentView === "tasks") {
+      state.tasksCalendarMonth = todayIso.slice(0, 7);
+      state.tasksCalendarSelectedDate = todayIso;
+    } else {
+      state.eventsCalendarMonth = todayIso.slice(0, 7);
+      state.eventsCalendarSelectedDate = todayIso;
+    }
+    renderView();
+  });
+
+  contentEl.querySelectorAll("[data-cal-date]").forEach(cell => {
+    cell.addEventListener("click", e => {
+      const pill = e.target.closest("[data-cal-item-id]");
+      const targetDate = cell.dataset.calDate;
+      if (state.currentView === "tasks") {
+        state.tasksCalendarSelectedDate = targetDate;
+      } else {
+        state.eventsCalendarSelectedDate = targetDate;
+      }
+      if (pill) {
+        const itemId = pill.dataset.calItemId;
+        renderView();
+        if (state.currentView === "tasks") {
+          openTaskDetailModal(itemId);
+        } else {
+          openEventDetailModal(itemId);
+        }
+        return;
+      }
+      renderView();
+    });
+  });
 
   contentEl.querySelectorAll("[data-task-detail]").forEach(btn => {
     btn.addEventListener("click", e => {
@@ -3321,6 +3678,18 @@ function openTaskDetailModal(sysId) {
       </div>
 
       <div class="detail-item">
+        <div class="detail-label">🔔 プッシュ通知設定（運営メンバー向けリマインド）</div>
+        <div class="detail-value">
+          <span class="badge ${isRecordNotifyEnabled(rec) ? "badge-notify" : "badge-notify-off"}" style="font-size: 0.88rem; padding: 4px 12px;">
+            ${escapeHtml(formatNotifySettingSummary(rec))}
+          </span>
+          <div style="font-size: 0.76rem; color: var(--text-muted); font-weight: 400; margin-top: 4px;">
+            ※右上の「✏️ 編集」から、通知を行うか（ON/OFF）および通知タイミングを変更できます。
+          </div>
+        </div>
+      </div>
+
+      <div class="detail-item">
         <div class="detail-label">📝 メモ（任意）</div>
         <div class="detail-value" style="white-space: pre-wrap; font-weight: 500; line-height: 1.55;">
           ${rec.memo
@@ -3513,6 +3882,20 @@ function openEventDetailModal(sysId) {
           }
         </div>
       </div>
+
+      ${isAdminRole(state.userRole) ? `
+        <div class="detail-item">
+          <div class="detail-label">🔔 プッシュ通知設定（運営メンバー向けリマインド）</div>
+          <div class="detail-value">
+            <span class="badge ${isRecordNotifyEnabled(rec) ? "badge-notify" : "badge-notify-off"}" style="font-size: 0.88rem; padding: 4px 12px;">
+              ${escapeHtml(formatNotifySettingSummary(rec))}
+            </span>
+            <div style="font-size: 0.76rem; color: var(--text-muted); font-weight: 400; margin-top: 4px;">
+              ※右上の「✏️ 編集」から、通知を行うか（ON/OFF）および通知タイミングを変更できます。
+            </div>
+          </div>
+        </div>
+      ` : ""}
     </div>
   `;
 
@@ -4089,7 +4472,18 @@ function openFormModal(sysId = null) {
     const nextTaskId = generateNextTaskId(db.tasks);
     const rec = sysId
       ? db.tasks.find(t => t.sysId === sysId)
-      : { taskId: nextTaskId, taskName: "", status: "未着手", assignee: "", dueDate: "", memo: "" };
+      : {
+          taskId: nextTaskId,
+          taskName: "",
+          status: "未着手",
+          assignee: "",
+          dueDate: "",
+          memo: "",
+          notifyEnabled: true,
+          notifyDays: [...REMINDER_TARGET_DAYS]
+        };
+    const taskNotifyEnabled = isRecordNotifyEnabled(rec);
+    const taskNotifyDays = getRecordNotifyDays(rec);
 
     const memberNames = Array.from(new Set(db.members.map(m => m.name).filter(Boolean)));
     if (rec.assignee && !memberNames.includes(rec.assignee)) {
@@ -4194,8 +4588,43 @@ function openFormModal(sysId = null) {
             </optgroup>
           </select>
         </div>
-        <span class="form-hint">※期日がまだ決まっていない場合は「〇月」＋「<strong>上旬 / 中旬 / 下旬</strong>」を選択できます（具体的な日付を設定した場合は3日前・1日前・当日に通知されます）。</span>
+        <span class="form-hint">※期日がまだ決まっていない場合は「〇月」＋「<strong>上旬 / 中旬 / 下旬</strong>」を選択できます（具体的な日付を設定した場合は下の通知設定に従って通知されます）。</span>
       </div>
+
+      <div class="form-group">
+        <label class="form-label">
+          🔔 プッシュ通知（リマインド）設定
+        </label>
+        <div class="notify-settings-box">
+          <div class="notify-toggle-row">
+            <label class="notify-toggle-label">
+              <input type="checkbox" id="fieldTaskNotifyEnabled" ${taskNotifyEnabled ? "checked" : ""} />
+              <span>このタスクのプッシュ通知を行う（ON / OFF）</span>
+            </label>
+            <button type="button" class="btn-icon" id="btnResetTaskNotifyDefault" style="font-size: 0.74rem; padding: 3px 8px;">
+              標準（3日前・1日前・当日）に戻す
+            </button>
+          </div>
+          <div class="notify-timing-wrap ${taskNotifyEnabled ? "" : "disabled"}" id="taskNotifyTimingWrap">
+            <span style="font-size: 0.78rem; font-weight: 700; color: var(--primary-dark);">
+              通知するタイミングを選択（複数選択可）:
+            </span>
+            <div class="notify-timing-chips">
+              ${NOTIFY_DAY_OPTIONS.map(opt => {
+                const checked = taskNotifyDays.includes(opt.days);
+                return `
+                  <label class="notify-chip-label ${checked ? "checked" : ""}">
+                    <input type="checkbox" name="fieldTaskNotifyDays" value="${opt.days}" ${checked ? "checked" : ""} />
+                    <span>${escapeHtml(opt.label)}</span>
+                  </label>
+                `;
+              }).join("")}
+            </div>
+            <span class="form-hint">※具体的な期限日（何月何日）が設定されている未完了タスクに対して、選択したタイミングで通知します。</span>
+          </div>
+        </div>
+      </div>
+
       <div class="form-group">
         <label class="form-label" for="fieldTaskMemo">
           メモ <span class="ro-tag">任意</span>
@@ -4227,13 +4656,44 @@ function openFormModal(sysId = null) {
       if (selM) selM.value = "";
       if (selD) selD.value = "";
     });
+
+    const taskNotifyToggle = document.getElementById("fieldTaskNotifyEnabled");
+    const taskTimingWrap = document.getElementById("taskNotifyTimingWrap");
+    taskNotifyToggle?.addEventListener("change", () => {
+      taskTimingWrap?.classList.toggle("disabled", !taskNotifyToggle.checked);
+    });
+    bodyEl.querySelectorAll('input[name="fieldTaskNotifyDays"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        cb.closest(".notify-chip-label")?.classList.toggle("checked", cb.checked);
+      });
+    });
+    document.getElementById("btnResetTaskNotifyDefault")?.addEventListener("click", () => {
+      if (taskNotifyToggle) taskNotifyToggle.checked = true;
+      taskTimingWrap?.classList.remove("disabled");
+      bodyEl.querySelectorAll('input[name="fieldTaskNotifyDays"]').forEach(cb => {
+        const isDef = REMINDER_TARGET_DAYS.includes(Number(cb.value));
+        cb.checked = isDef;
+        cb.closest(".notify-chip-label")?.classList.toggle("checked", isDef);
+      });
+    });
   } else if (state.currentView === "events") {
     const nextEventId = generateNextEventId(db.events);
     const rec = sysId
       ? db.events.find(ev => ev.sysId === sysId)
-      : { eventId: nextEventId, eventName: "", eventDate: "", location: "", status: "開催", adminOnly: false };
+      : {
+          eventId: nextEventId,
+          eventName: "",
+          eventDate: "",
+          location: "",
+          status: "開催",
+          adminOnly: false,
+          notifyEnabled: true,
+          notifyDays: [...REMINDER_TARGET_DAYS]
+        };
     const currentStatus = getAutoEventStatus(rec);
     const curLoc = String(rec.location || "").trim();
+    const eventNotifyEnabled = isRecordNotifyEnabled(rec);
+    const eventNotifyDays = getRecordNotifyDays(rec);
 
     // 既存の場所文字列からプルダウン初期値を判定
     let initialPreset = "";
@@ -4260,7 +4720,7 @@ function openFormModal(sysId = null) {
       </div>
       <div class="form-group">
         <label class="form-label" for="fieldEventDate">
-          開催日 <span class="ro-tag">3日前・1日前・当日に通知 / 出欠表と自動連携</span>
+          開催日 <span class="ro-tag">プッシュ通知 / 出欠表と自動連携</span>
         </label>
         <input type="date" id="fieldEventDate" class="form-control" value="${escapeHtml(rec.eventDate || "")}" />
       </div>
@@ -4285,6 +4745,40 @@ function openFormModal(sysId = null) {
           />
         </div>
         <span class="form-hint">※左のプルダウンから「教室 / 体育館 / Discord通話 / その他」を選ぶと右の入力欄に反映され、教室番号などの詳細も自由に追記できます。</span>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">
+          🔔 プッシュ通知（リマインド）設定
+        </label>
+        <div class="notify-settings-box">
+          <div class="notify-toggle-row">
+            <label class="notify-toggle-label">
+              <input type="checkbox" id="fieldEventNotifyEnabled" ${eventNotifyEnabled ? "checked" : ""} />
+              <span>このイベントのプッシュ通知を行う（ON / OFF）</span>
+            </label>
+            <button type="button" class="btn-icon" id="btnResetEventNotifyDefault" style="font-size: 0.74rem; padding: 3px 8px;">
+              標準（3日前・1日前・当日）に戻す
+            </button>
+          </div>
+          <div class="notify-timing-wrap ${eventNotifyEnabled ? "" : "disabled"}" id="eventNotifyTimingWrap">
+            <span style="font-size: 0.78rem; font-weight: 700; color: var(--primary-dark);">
+              通知するタイミングを選択（複数選択可）:
+            </span>
+            <div class="notify-timing-chips">
+              ${NOTIFY_DAY_OPTIONS.map(opt => {
+                const checked = eventNotifyDays.includes(opt.days);
+                return `
+                  <label class="notify-chip-label ${checked ? "checked" : ""}">
+                    <input type="checkbox" name="fieldEventNotifyDays" value="${opt.days}" ${checked ? "checked" : ""} />
+                    <span>${escapeHtml(opt.label)}</span>
+                  </label>
+                `;
+              }).join("")}
+            </div>
+            <span class="form-hint">※開催日が設定されているイベントに対して、選択したタイミングで運営メンバーへリマインド通知します。</span>
+          </div>
+        </div>
       </div>
 
       <hr style="border: none; border-top: 1px solid var(--border); margin: 4px 0;" />
@@ -4340,6 +4834,26 @@ function openFormModal(sysId = null) {
       if (val && statusSel) {
         statusSel.value = val < getTodayIsoString() ? "終了" : "開催";
       }
+    });
+
+    const eventNotifyToggle = document.getElementById("fieldEventNotifyEnabled");
+    const eventTimingWrap = document.getElementById("eventNotifyTimingWrap");
+    eventNotifyToggle?.addEventListener("change", () => {
+      eventTimingWrap?.classList.toggle("disabled", !eventNotifyToggle.checked);
+    });
+    bodyEl.querySelectorAll('input[name="fieldEventNotifyDays"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        cb.closest(".notify-chip-label")?.classList.toggle("checked", cb.checked);
+      });
+    });
+    document.getElementById("btnResetEventNotifyDefault")?.addEventListener("click", () => {
+      if (eventNotifyToggle) eventNotifyToggle.checked = true;
+      eventTimingWrap?.classList.remove("disabled");
+      bodyEl.querySelectorAll('input[name="fieldEventNotifyDays"]').forEach(cb => {
+        const isDef = REMINDER_TARGET_DAYS.includes(Number(cb.value));
+        cb.checked = isDef;
+        cb.closest(".notify-chip-label")?.classList.toggle("checked", isDef);
+      });
     });
   }
 
@@ -4400,6 +4914,7 @@ function renderDbTable() {
             <th>タスク名</th>
             <th>担当者</th>
             <th>期限</th>
+            <th>通知設定</th>
             <th>メモ</th>
           </tr>
         </thead>
@@ -4412,6 +4927,7 @@ function renderDbTable() {
               <td>${escapeHtml(t.taskName)}</td>
               <td>${escapeHtml(t.assignee || "")}</td>
               <td>${escapeHtml(formatTaskDueText(t.dueDate))}</td>
+              <td>${escapeHtml(formatNotifySettingSummary(t))}</td>
               <td>${escapeHtml(t.memo || "")}</td>
             </tr>
           `).join("")}
@@ -4431,6 +4947,7 @@ function renderDbTable() {
             <th>場所</th>
             <th>ステータス</th>
             <th>公開範囲</th>
+            <th>通知設定</th>
           </tr>
         </thead>
         <tbody>
@@ -4445,6 +4962,7 @@ function renderDbTable() {
                 <td>${escapeHtml(ev.location || "")}</td>
                 <td>${escapeHtml(evStatus)}</td>
                 <td>${ev.adminOnly ? "運営限定" : "全員公開"}</td>
+                <td>${escapeHtml(formatNotifySettingSummary(ev))}</td>
               </tr>
             `;
           }).join("")}
@@ -4508,7 +5026,7 @@ function downloadCurrentSheetCsv() {
     ]);
     filename = "教職の森_運営管理アプリDB_メンバー.csv";
   } else if (sheet === "tasks") {
-    headers = ["システムID", "タスクID", "進捗", "タスク名", "担当者", "期限", "メモ"];
+    headers = ["システムID", "タスクID", "進捗", "タスク名", "担当者", "期限", "通知設定", "メモ"];
     rows = db.tasks.map(t => [
       t.sysId,
       t.taskId,
@@ -4516,12 +5034,13 @@ function downloadCurrentSheetCsv() {
       t.taskName,
       t.assignee || "",
       formatTaskDueText(t.dueDate),
+      formatNotifySettingSummary(t),
       t.memo || ""
     ]);
     filename = "教職の森_運営管理アプリDB_タスク.csv";
   } else if (sheet === "events") {
     refreshAllEventStatuses(db.events);
-    headers = ["システムID", "イベントID", "イベント名", "開催日", "場所", "ステータス", "公開範囲"];
+    headers = ["システムID", "イベントID", "イベント名", "開催日", "場所", "ステータス", "公開範囲", "通知設定"];
     rows = db.events.map(ev => [
       ev.sysId,
       ev.eventId,
@@ -4529,7 +5048,8 @@ function downloadCurrentSheetCsv() {
       ev.eventDate || "",
       ev.location || "",
       getAutoEventStatus(ev),
-      ev.adminOnly ? "運営限定" : "全員公開"
+      ev.adminOnly ? "運営限定" : "全員公開",
+      formatNotifySettingSummary(ev)
     ]);
     filename = "教職の森_運営管理アプリDB_イベント.csv";
   } else {
@@ -4633,10 +5153,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.querySelectorAll("#eventsViewToggleWrap .view-toggle-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      state.eventsLayout = btn.dataset.layout;
+      const nextLayout = btn.dataset.layout;
+      if (state.currentView === "tasks") {
+        state.tasksLayout = nextLayout;
+      } else if (state.currentView === "events") {
+        state.eventsLayout = nextLayout;
+      }
       document
         .querySelectorAll("#eventsViewToggleWrap .view-toggle-btn")
-        .forEach(b => b.classList.toggle("active", b.dataset.layout === state.eventsLayout));
+        .forEach(b => b.classList.toggle("active", b.dataset.layout === nextLayout));
       renderView();
     });
   });
@@ -4867,6 +5392,16 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const memo = (document.getElementById("fieldTaskMemo")?.value || "").trim();
+      const notifyEnabledRaw = Boolean(document.getElementById("fieldTaskNotifyEnabled")?.checked);
+      const selectedNotifyDays = Array.from(
+        document.querySelectorAll('input[name="fieldTaskNotifyDays"]:checked')
+      )
+        .map(cb => Number(cb.value))
+        .filter(n => Number.isInteger(n) && n >= 0)
+        .sort((a, b) => b - a);
+      const notifyEnabled = notifyEnabledRaw && selectedNotifyDays.length > 0;
+      const notifyDays = selectedNotifyDays.length > 0 ? selectedNotifyDays : [...REMINDER_TARGET_DAYS];
+
       if (!taskName) return;
 
       if (sysId) {
@@ -4877,6 +5412,8 @@ document.addEventListener("DOMContentLoaded", () => {
           target.assignee = assignee;
           target.dueDate = dueDate;
           target.memo = memo;
+          target.notifyEnabled = notifyEnabled;
+          target.notifyDays = notifyDays;
         }
       } else {
         db.tasks.push({
@@ -4886,7 +5423,9 @@ document.addEventListener("DOMContentLoaded", () => {
           status,
           assignee,
           dueDate,
-          memo
+          memo,
+          notifyEnabled,
+          notifyDays
         });
       }
     } else if (state.currentView === "events") {
@@ -4898,6 +5437,16 @@ document.addEventListener("DOMContentLoaded", () => {
       const location = textLoc || (presetLoc && presetLoc !== "その他" ? presetLoc : "");
       const manualStatus = document.getElementById("fieldEventStatus")?.value || "開催";
       const adminOnly = Boolean(document.getElementById("fieldEventAdminOnly")?.checked);
+      const notifyEnabledRaw = Boolean(document.getElementById("fieldEventNotifyEnabled")?.checked);
+      const selectedNotifyDays = Array.from(
+        document.querySelectorAll('input[name="fieldEventNotifyDays"]:checked')
+      )
+        .map(cb => Number(cb.value))
+        .filter(n => Number.isInteger(n) && n >= 0)
+        .sort((a, b) => b - a);
+      const notifyEnabled = notifyEnabledRaw && selectedNotifyDays.length > 0;
+      const notifyDays = selectedNotifyDays.length > 0 ? selectedNotifyDays : [...REMINDER_TARGET_DAYS];
+
       if (!eventName) return;
 
       const computedStatus =
@@ -4914,6 +5463,8 @@ document.addEventListener("DOMContentLoaded", () => {
           target.location = location;
           target.status = computedStatus;
           target.adminOnly = adminOnly;
+          target.notifyEnabled = notifyEnabled;
+          target.notifyDays = notifyDays;
           syncEventToMonthlySchedule(target, previousDate);
         }
       } else {
@@ -4924,7 +5475,9 @@ document.addEventListener("DOMContentLoaded", () => {
           eventDate,
           location,
           status: computedStatus,
-          adminOnly
+          adminOnly,
+          notifyEnabled,
+          notifyDays
         };
         db.events.push(newEv);
         syncEventToMonthlySchedule(newEv, null);
@@ -5045,6 +5598,7 @@ document.addEventListener("DOMContentLoaded", () => {
       signInWithGoogle();
     }
   };
+
   document.getElementById("btnGoogleAuth")?.addEventListener("click", handleAuthButtonClick);
   document.getElementById("btnHeaderAuth")?.addEventListener("click", handleAuthButtonClick);
 
